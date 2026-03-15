@@ -1,11 +1,11 @@
 version: 2
 ethernets:
-  enp1s0:
+  $NIC_NAME:
     addresses:
-      - ${ip_address}/24
+      - $IP_ADDRESS/24
     routes:
       - to: default
-        via: 192.168.122.1
+        via: $GATEWAY
     nameservers:
       addresses:
-        - 192.168.122.1
+        - $DNS

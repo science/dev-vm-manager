@@ -1,46 +1,43 @@
 #!/bin/bash
-# Provision a VM with yadm dotfiles after Terraform has created it.
+# Provision a VM with yadm dotfiles.
 # Usage: ./provision.sh <vm-name>
 #
-# Prerequisites: VM must be running with SSH access (terraform apply).
+# Prerequisites: VM must be running with SSH access (create-dev-vm).
 # Interactive: GPG passphrase prompt for secrets decryption.
 set -euo pipefail
 
 VM_NAME="${1:?Usage: provision.sh <vm-name>}"
 TARGET="steve@$VM_NAME"
 REPO="https://github.com/science/dotfiles.git"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
 
 echo "=== Provisioning $VM_NAME ==="
 
-# --- Wait for SSH ---
-echo "Waiting for SSH..."
-for i in $(seq 1 90); do
-    if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$TARGET" true 2>/dev/null; then
-        break
-    fi
-    if (( i % 6 == 0 )); then
-        echo "  Still waiting... ($((i * 10))s)"
-    fi
-    sleep 10
+# --- Add shared directories (stop/start required for multiple virtiofs devices) ---
+echo "Adding shared directories..."
+incus stop "$VM_NAME" --timeout 60
+incus config device add "$VM_NAME" devmount disk \
+    source="$HOST_DEV_DIR" path=/home/steve/dev
+incus config device add "$VM_NAME" picsmount disk \
+    source="$HOST_PICTURES_DIR" path=/home/steve/Pictures
+incus start "$VM_NAME"
+echo "Waiting for VM to come back..."
+for i in $(seq 1 30); do
+    ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$TARGET" true 2>/dev/null && break
+    sleep 2
 done
 
-if ! ssh -o ConnectTimeout=5 "$TARGET" true 2>/dev/null; then
-    echo "ERROR: SSH to $VM_NAME never came up after 15 minutes."
-    echo "Try: virt-viewer $VM_NAME"
-    echo "Try: ping $(grep "$VM_NAME" /etc/hosts | awk '{print $1}')"
+# --- Verify SSH ---
+if ! ssh -o ConnectTimeout=10 "$TARGET" true 2>/dev/null; then
+    echo "ERROR: SSH to $VM_NAME is not working after restart."
     exit 1
 fi
 echo "SSH is up."
 
-# --- Wait for cloud-init ---
-echo "Waiting for cloud-init to finish..."
-ssh "$TARGET" 'cloud-init status --wait'
-echo "Cloud-init complete."
-
 # --- Install yadm + gh ---
 echo "Installing yadm and gh..."
-ssh "$TARGET" 'command -v yadm >/dev/null || (sudo apt update && sudo apt install -y yadm)'
-ssh "$TARGET" 'command -v gh >/dev/null || (sudo apt update && sudo apt install -y gh)'
+ssh "$TARGET" 'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq yadm gh'
 
 # --- Copy auth credentials from host ---
 echo "Copying auth credentials..."
@@ -106,4 +103,4 @@ ssh "$TARGET" '~/.config/yadm/test-dotfiles.sh'
 echo ""
 echo "=== $VM_NAME fully provisioned ==="
 echo "  SSH:   ssh steve@$VM_NAME"
-echo "  SPICE: virt-viewer $VM_NAME"
+echo "  Console: incus console $VM_NAME --type vga"

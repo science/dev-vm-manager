@@ -1,27 +1,26 @@
 # dev-vm-manager
 
-Automated creation and provisioning of KVM/libvirt dev VMs using Terraform and cloud-init.
+Automated creation and provisioning of isolated dev VMs using Incus (KVM/QEMU).
 
 ## Problem
 
-Dev VMs need to be created from scratch, provisioned with a full Cinnamon desktop, and configured with yadm dotfiles — reproducibly, idempotently, and without manual steps beyond a single GPG passphrase prompt.
+Dev VMs need to be created and re-created from scratch, provisioned with a full desktop and dev tools, and configured with yadm dotfiles — reproducibly and without manual steps beyond a single GPG passphrase prompt.
 
-Previous attempts using bash/python scripts that shelled out to `virsh`, `virt-install`, and managed dnsmasq DHCP state directly were unreliable. libvirt's DHCP/dnsmasq layer has edge cases around stale leases, reservation timing, and network restarts that are painful to manage imperatively.
+## Project Goals
 
-## Approach
-
-- **Terraform** with the [`dmacvicar/libvirt`](https://github.com/dmacvicar/terraform-provider-libvirt) provider manages VM infrastructure declaratively: domains, volumes, cloud-init ISOs, network config. `terraform apply` creates, `terraform destroy` tears down cleanly.
-- **Cloud-init** handles first-boot OS config: hostname, user, SSH key, static IP, desktop packages, autologin.
-- **A post-provision script** handles yadm deployment: installing yadm/gh, copying auth credentials, cloning dotfiles, decrypting secrets (interactive GPG), running bootstrap, and verifying with the test suite.
+1. **Isolated dev environments** — VMs are fully isolated from the host OS filesystem, except specific shared mounts (`~/dev` and `~/Pictures`). These VMs host Claude Code AI development.
+2. **Reproducible setup** — `create-dev-vm dev-1` produces the same result every time regardless of starting state.
+3. **yadm as source of truth** — Desktop, dev tools, and all configuration are managed by yadm bootstrap, keeping VMs and host OS in sync from one source of truth.
+4. **Portable** — works across multiple developer workstations with no hardcoded machine-specific values.
 
 ## VMs
 
-| Name | IP | Purpose |
-|------|-----|---------|
-| dev-1 | 192.168.122.101 | General dev VM |
-| dev-2 | 192.168.122.102 | General dev VM |
+| Name | Purpose |
+|------|---------|
+| dev-1 | General dev VM |
+| dev-2 | General dev VM |
 
-Both are Ubuntu 24.04 (Noble) with Cinnamon desktop, 8 GiB RAM, 4 vCPUs, 40 GB disk, virtiofs mounts for `~/dev` and `~/Pictures`.
+Ubuntu 24.04 (Noble), 8 GiB RAM, 4 vCPUs, 40 GB disk, virtiofs mounts for `~/dev` and `~/Pictures`. IPs assigned via DHCP.
 
 ## Usage
 
@@ -29,18 +28,21 @@ Both are Ubuntu 24.04 (Noble) with Cinnamon desktop, 8 GiB RAM, 4 vCPUs, 40 GB d
 # First time: install dependencies
 ./setup.sh
 
-# Create a VM
-terraform apply -var="vm_name=dev-1"
-
-# Provision with yadm dotfiles (interactive: needs GPG passphrase)
-./provision.sh dev-1
+# Create a VM (handles everything end-to-end)
+./create-dev-vm dev-1
 
 # Destroy a VM
-terraform destroy -var="vm_name=dev-1"
+./destroy-dev-vm dev-1
 
-# Destroy everything
-terraform destroy
+# Access the VM
+ssh steve@dev-1
+incus console dev-1 --type vga
 ```
+
+## How It Works
+
+1. **create-dev-vm** creates a bare VM with Incus, configures a user and SSH via `incus exec`, installs openssh-server
+2. **provision.sh** adds shared directories (stop/start cycle), installs yadm/gh, copies auth credentials from host, clones dotfiles, decrypts secrets (GPG passphrase — the only interactive step), runs yadm bootstrap
 
 ## Structure
 
@@ -48,28 +50,26 @@ terraform destroy
 .
 ├── README.md           # This file
 ├── CLAUDE.md           # AI assistant guidance
-├── plan.md             # Goals, objectives, tasks
-├── setup.sh            # Install terraform + libvirt provider
-├── main.tf             # Terraform config for VM infrastructure
-├── variables.tf        # Terraform variables
-├── cloud-init/         # Cloud-init templates
-│   ├── user-data.tpl
-│   └── network-config.tpl
-├── provision.sh        # Post-terraform yadm deployment
-└── tests/              # Validation scripts
+├── plan.md             # Architecture decisions and tasks
+├── config.sh           # Shared configuration (VM names, resources, paths)
+├── setup.sh            # Install incus + apt-cacher-ng
+├── create-dev-vm       # Main entry point: create + configure + provision
+├── destroy-dev-vm      # Tear down a VM cleanly
+├── provision.sh        # yadm deployment (shared dirs, auth, clone, bootstrap)
+├── cloud-init/         # Templates (historical, not currently used)
+│   └── user-data.tpl
+└── tests/
     └── smoke-test.sh   # Quick VM health check
 ```
 
 ## Dependencies
 
-- Host: Ubuntu 24.04 with KVM/libvirt (`libvirtd`, `virsh`, `qemu-kvm`)
-- Terraform >= 1.0 with `dmacvicar/libvirt` provider
-- `cloud-image-utils` (for `cloud-localds`)
+- Host: Ubuntu 24.04 with KVM support
+- Incus (installed via `setup.sh`)
+- apt-cacher-ng (optional, for fast package caching)
 - SSH key at `~/.ssh/id_ed25519.pub`
 - yadm dotfiles repo: `https://github.com/science/dotfiles.git`
 
 ## Relationship to yadm dotfiles
 
-This project is **not** tracked by yadm. It lives in `~/dev/dev-vm-manager/` as its own git repo. The yadm dotfiles repo references it in bootstrap (for post-install steps on `linux-bambam`) but this project has no dependency on yadm to function.
-
-The provisioning script (`provision.sh`) calls into the yadm dotfiles to deploy and test them on the new VM.
+This project is **not** tracked by yadm. It lives in `~/dev/dev-vm-manager/` as its own git repo. The provisioning script calls yadm to deploy and test dotfiles on the new VM. Long-term, apt-cacher-ng and desktop package installation will move into yadm bootstrap so host and VM environments stay in sync.

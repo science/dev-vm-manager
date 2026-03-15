@@ -2,82 +2,76 @@
 
 ## What This Project Does
 
-Creates and provisions KVM/libvirt dev VMs using Terraform + cloud-init, then deploys yadm dotfiles via SSH. The host is `linux-bambam` (Ubuntu 24.04, Cinnamon desktop).
+Creates and provisions KVM dev VMs using Incus, then deploys yadm dotfiles via SSH. The host runs Ubuntu 24.04 with Cinnamon desktop.
 
 ## Key Constraints
 
-1. **Terraform manages infrastructure, provision.sh manages software.** Don't mix these — Terraform creates a bootable VM with SSH access, provision.sh does everything else.
+1. **create-dev-vm creates infrastructure, provision.sh configures software.** Don't mix these — create-dev-vm makes a bootable VM with a user and SSH, provision.sh does everything else.
 2. **The only interactive step is GPG passphrase entry.** Everything else must be automated. Set `pinentry-timeout 0` in the VM's gpg-agent.conf before decrypting.
-3. **VMs use static IPs via cloud-init network-config.** Do NOT use libvirt DHCP reservations — they are unreliable (stale leases, timing races, dnsmasq state issues). The cloud-init `network-config` file sets the IP before the guest OS touches the network.
-4. **virtiofs requires `memorybacking source.type=memfd,access.mode=shared`** in the domain definition. Without this, virtiofs mounts fail silently.
-5. **UEFI boot is required** (`firmware = "/usr/share/OVMF/OVMF_CODE.fd"`). Internal snapshots don't work with UEFI — use qcow2 file copies for backups.
+3. **VMs use DHCP.** Incus manages DHCP via incusbr0. The script discovers the assigned IP at runtime via `incus list` and updates /etc/hosts.
+4. **No cloud-init.** VM configuration (user, SSH, hostname, packages) is done via `incus exec` after boot. This avoids cloud-init's YAML quirks and ordering issues.
+5. **yadm is the source of truth for environment config.** Cloud-init / create-dev-vm install only the bare minimum (user, SSH, openssh-server). Desktop, dev tools, and all other software are yadm bootstrap's job.
+6. **Portable — no hardcoded machine-specific values.** Must work across multiple developer workstations.
 
 ## VM Specs
 
 | Setting | Value |
 |---------|-------|
-| OS | Ubuntu 24.04 Noble (cloud image) |
+| OS | Ubuntu 24.04 Noble |
 | RAM | 8 GiB |
 | vCPUs | 4 |
-| Disk | 40 GB qcow2 |
-| Network | libvirt default (192.168.122.0/24) |
-| dev-1 IP | 192.168.122.101 |
-| dev-2 IP | 192.168.122.102 |
-| NIC | virtio (guest sees `enp1s0`) |
-| Graphics | SPICE + virtio GPU |
+| Disk | 40 GB |
+| Network | Incus managed DHCP (incusbr0) |
+| Graphics | SPICE (via `incus console --type vga`) |
 | Shared dirs | ~/dev (virtiofs), ~/Pictures (virtiofs) |
 
-## Cloud-init Responsibilities
+## create-dev-vm Responsibilities
 
-Cloud-init installs **only** what's needed to boot to desktop + enable SSH:
-- cinnamon-desktop-environment, lightdm, slick-greeter, gnome-terminal
-- spice-vdagent, openssh-server
-- User `steve` with NOPASSWD sudo and SSH key
-- Autologin config
-- virtiofs fstab entries
-- Static IP via network-config
-
-Everything else (curl, git, gh, yadm, build-essential, nodejs, etc.) is yadm bootstrap's job.
+1. Validate VM name against known list in config.sh
+2. Prompt to destroy if VM already exists
+3. Cache base image locally (one-time download)
+4. `incus init` + `incus start`
+5. Wait for DHCP IP, update /etc/hosts
+6. Wait for incus agent
+7. Configure via `incus exec`: user, SSH key, hostname, timezone, apt proxy, openssh-server
+8. Run smoke test
+9. Hand off to provision.sh
 
 ## provision.sh Responsibilities
 
-1. Install yadm + gh on the VM
-2. Copy GitHub auth (`~/.config/gh/hosts.yml`) and Claude auth (`~/.claude.json`) from host
-3. Set up git credential helper for GitHub
-4. `yadm clone` (or pull if exists)
-5. Decrypt secrets (interactive GPG — the only manual step)
-6. Re-setup credential helper (yadm checkout may overwrite .gitconfig)
-7. `YADM_INSTALL=1 yadm bootstrap`
-8. Run test suite (`~/.config/yadm/test-dotfiles.sh`)
+1. Stop VM, add virtiofs shared directories (~/dev, ~/Pictures), restart
+2. Wait for SSH
+3. Install yadm + gh
+4. Copy GitHub auth and Claude auth from host
+5. Set up git credential helper
+6. `yadm clone` (or pull if exists)
+7. Decrypt secrets (interactive GPG — the only manual step)
+8. Re-setup credential helper (yadm checkout may overwrite .gitconfig)
+9. `YADM_INSTALL=1 yadm bootstrap`
+10. Run test suite (`~/.config/yadm/test-dotfiles.sh`)
 
-## Terraform Provider Notes
+## apt-cacher-ng
 
-The `dmacvicar/libvirt` provider:
-- `libvirt_volume` — manages qcow2 disk images
-- `libvirt_cloudinit_disk` — creates seed ISO from user-data + network-config
-- `libvirt_domain` — creates the VM with all hardware config
-- State is in `terraform.tfstate` — don't delete this file
-- `terraform destroy` cleanly removes everything it created
+The host runs apt-cacher-ng as a local package cache. VMs are configured to use it via the incus bridge IP. This means:
+- First VM build downloads packages from the internet (~15-20 min for cinnamon)
+- Every subsequent rebuild pulls from local cache (seconds)
+- The cache can be pre-warmed by running a throwaway VM with `apt-get install --download-only`
 
 ## Testing
 
-After `terraform apply`:
-- `ping <vm-ip>` should work immediately
-- `ssh steve@<vm-name> true` should work within ~2 min (cloud-init installing openssh)
-- `ssh steve@<vm-name> cloud-init status` should show `done` after ~15-20 min
+After `create-dev-vm`:
+- Smoke test runs automatically (VM exists, running, has IP, SSH works)
 
 After `provision.sh`:
-- `ssh steve@<vm-name> '~/.config/yadm/test-dotfiles.sh'` — 99 tests, 0 failures
+- `ssh steve@<vm-name> '~/.config/yadm/test-dotfiles.sh'`
 
 ## Don'ts
 
-- Don't use `virsh net-update` for DHCP reservations — use static IP in cloud-init
-- Don't manage dnsmasq leases — they're unreliable
-- Don't use `gateway4` in netplan — deprecated, use `routes`
 - Don't put VM management scripts in yadm — they belong here
-- Don't use `sudo -i` on linux-bambam — use `sudo <cmd>` (PAM fingerprint issue)
+- Don't use cloud-init — use `incus exec` for VM configuration
+- Don't hardcode IPs — use DHCP with runtime discovery
+- Don't install desktop/dev packages in create-dev-vm — that's yadm bootstrap's job
+- Don't use `incus stop --force` during provisioning — use `--timeout 60` for clean shutdown
+- Don't add virtiofs devices before user creation — they create mount points as root
+- Don't use `sudo -i` on the host — use `sudo <cmd>` (PAM fingerprint issue)
 - Don't pipe install scripts to `sh` — Ubuntu's sh is dash; use `bash`
-
-## sudo on linux-bambam
-
-This host has fingerprint-authenticated sudo via PAM. `sudo <cmd>` shows a GUI fingerprint popup. `sudo -i` bypasses it and will fail/timeout in non-TTY contexts. Always use `sudo <cmd>`.

@@ -1,0 +1,160 @@
+#!/bin/bash
+# Create and provision a dev VM end-to-end.
+# Usage: ./create-dev-vm <vm-name>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+# Ensure we have incus-admin group access (avoids needing logout/login)
+if ! incus info &>/dev/null 2>&1; then
+    if id -nG | grep -qw incus-admin; then
+        exec sg incus-admin "$0 $*"
+    else
+        echo "ERROR: Not in incus-admin group. Run: sudo usermod -aG incus-admin \$(whoami) && newgrp incus-admin"
+        exit 1
+    fi
+fi
+
+VM_NAME="${1:?Usage: create-dev-vm <vm-name>}"
+
+# Validate VM name
+found=false
+for name in "${VM_NAMES[@]}"; do
+    [[ "$name" == "$VM_NAME" ]] && found=true && break
+done
+if ! $found; then
+    echo "ERROR: Unknown VM name '$VM_NAME'. Known: ${VM_NAMES[*]}"
+    exit 1
+fi
+
+# Check for existing instance
+if incus info "$VM_NAME" &>/dev/null; then
+    echo "VM '$VM_NAME' already exists."
+    read -rp "Destroy and recreate? [y/N] " confirm
+    [[ "$confirm" == [yY] ]] || exit 0
+    "$SCRIPT_DIR/destroy-dev-vm" "$VM_NAME"
+fi
+
+# Ensure base image is cached locally
+if ! incus image list --format csv -c l | grep -q "^${INCUS_IMAGE_ALIAS}$"; then
+    echo "Downloading base image (one-time)..."
+    incus image copy "$INCUS_IMAGE_REMOTE" local: --alias "$INCUS_IMAGE_ALIAS" --vm --auto-update=false
+else
+    echo "Using cached image: $INCUS_IMAGE_ALIAS"
+fi
+
+echo "=== Creating VM: $VM_NAME ==="
+
+# Create VM (stopped) — shared dirs added later, after user creation
+incus init "$INCUS_IMAGE_ALIAS" "$VM_NAME" --vm \
+    -c limits.memory="$RAM" \
+    -c limits.cpu="$CPUS" \
+    -d root,size="$DISK"
+
+# Start VM
+incus start "$VM_NAME"
+
+# Wait for DHCP IP assignment
+echo "Waiting for IP address..."
+VM_IP=""
+for i in $(seq 1 30); do
+    VM_IP="$(incus list "$VM_NAME" --format csv -c 4 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)" || true
+    [[ -n "$VM_IP" ]] && break
+    sleep 2
+done
+if [[ -z "$VM_IP" ]]; then
+    echo "ERROR: VM never got an IP address after 60s."
+    exit 1
+fi
+echo "VM IP: $VM_IP"
+
+# /etc/hosts — remove stale entry, add current
+sudo sed -i "/$VM_NAME/d" /etc/hosts
+echo "$VM_IP  $VM_NAME" | sudo tee -a /etc/hosts
+
+# Clear stale SSH keys
+ssh-keygen -R "$VM_NAME" 2>/dev/null || true
+ssh-keygen -R "$VM_IP" 2>/dev/null || true
+
+# Wait for VM agent to come up
+echo "Waiting for VM agent..."
+for i in $(seq 1 60); do
+    if incus exec "$VM_NAME" -- true 2>/dev/null; then
+        break
+    fi
+    if (( i % 6 == 0 )); then
+        echo "  Still waiting... ($((i * 5))s)"
+    fi
+    sleep 5
+done
+
+if ! incus exec "$VM_NAME" -- true 2>/dev/null; then
+    echo "ERROR: VM agent never came up after 5 minutes."
+    echo "Try: incus console $VM_NAME --type vga"
+    exit 1
+fi
+echo "VM agent is up."
+
+# --- Configure VM via incus exec (no cloud-init) ---
+echo "Configuring VM..."
+
+# Set hostname (direct file write — no dbus dependency)
+incus exec "$VM_NAME" -- bash -c "echo '$VM_NAME' > /etc/hostname"
+incus exec "$VM_NAME" -- bash -c "sed -i 's/127.0.1.1.*/127.0.1.1 $VM_NAME/' /etc/hosts || echo '127.0.1.1 $VM_NAME' >> /etc/hosts"
+incus exec "$VM_NAME" -- hostname "$VM_NAME"
+
+# Create user steve with home dir, bash shell, sudo
+if ! incus exec "$VM_NAME" -- id steve &>/dev/null; then
+    incus exec "$VM_NAME" -- useradd -m -s /bin/bash -G sudo steve
+fi
+incus exec "$VM_NAME" -- bash -c 'echo "steve ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/steve'
+incus exec "$VM_NAME" -- chmod 440 /etc/sudoers.d/steve
+
+# Set password
+incus exec "$VM_NAME" -- chpasswd <<< 'REDACTED'
+
+# SSH key
+incus exec "$VM_NAME" -- mkdir -p /home/steve/.ssh
+incus exec "$VM_NAME" -- chmod 700 /home/steve/.ssh
+incus file push "$SSH_PUBKEY_PATH" "$VM_NAME/home/steve/.ssh/authorized_keys"
+incus exec "$VM_NAME" -- chmod 600 /home/steve/.ssh/authorized_keys
+incus exec "$VM_NAME" -- chown -R steve:steve /home/steve/.ssh
+
+# Set timezone (match host)
+HOST_TZ="$(cat /etc/timezone)"
+incus exec "$VM_NAME" -- ln -sf "/usr/share/zoneinfo/$HOST_TZ" /etc/localtime
+incus exec "$VM_NAME" -- bash -c "echo '$HOST_TZ' > /etc/timezone"
+
+# Configure apt proxy (if apt-cacher-ng is available on host)
+BRIDGE_IP="$(ip -4 addr show incusbr0 2>/dev/null | grep -oP 'inet \K[\d.]+' || true)"
+if [[ -n "$BRIDGE_IP" ]] && curl -s --connect-timeout 2 "http://${BRIDGE_IP}:${APT_PROXY_PORT}" >/dev/null 2>&1; then
+    echo "Configuring apt proxy: http://${BRIDGE_IP}:${APT_PROXY_PORT}"
+    incus exec "$VM_NAME" -- bash -c "echo 'Acquire::http::Proxy \"http://${BRIDGE_IP}:${APT_PROXY_PORT}\";' > /etc/apt/apt.conf.d/01proxy"
+else
+    echo "No apt proxy detected, using direct downloads."
+fi
+
+# Install openssh-server
+incus exec "$VM_NAME" -- bash -c 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && apt-get install -y -qq openssh-server'
+
+echo "VM configured."
+
+# Smoke test
+echo ""
+echo "=== Running smoke test ==="
+if "$SCRIPT_DIR/tests/smoke-test.sh" "$VM_NAME"; then
+    echo "Smoke test passed."
+else
+    echo "WARNING: Smoke test had failures. Continuing with provisioning anyway."
+fi
+
+# Provision
+echo ""
+echo "=== Running provisioning ==="
+"$SCRIPT_DIR/provision.sh" "$VM_NAME"
+
+echo ""
+echo "=== $VM_NAME is ready ==="
+echo "  SSH:     ssh steve@$VM_NAME"
+echo "  Console: incus console $VM_NAME --type vga"

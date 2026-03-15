@@ -1,0 +1,48 @@
+#!/bin/bash
+# Destroy a dev VM and clean up all state.
+# Usage: ./destroy-dev-vm <vm-name>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+# Ensure we have incus-admin group access (avoids needing logout/login)
+if ! incus info &>/dev/null 2>&1; then
+    if id -nG | grep -qw incus-admin; then
+        exec sg incus-admin "$0 $*"
+    else
+        echo "ERROR: Not in incus-admin group. Run: sudo usermod -aG incus-admin \$(whoami) && newgrp incus-admin"
+        exit 1
+    fi
+fi
+
+VM_NAME="${1:?Usage: destroy-dev-vm <vm-name>}"
+
+# Validate VM name
+found=false
+for name in "${VM_NAMES[@]}"; do
+    [[ "$name" == "$VM_NAME" ]] && found=true && break
+done
+if ! $found; then
+    echo "ERROR: Unknown VM name '$VM_NAME'. Known: ${VM_NAMES[*]}"
+    exit 1
+fi
+
+echo "=== Destroying VM: $VM_NAME ==="
+
+# Delete instance (handles stop + cleanup)
+if incus info "$VM_NAME" &>/dev/null; then
+    incus delete "$VM_NAME" --force
+    echo "Instance deleted."
+else
+    echo "No incus instance '$VM_NAME' found."
+fi
+
+# Remove /etc/hosts entry
+sudo sed -i "/$VM_NAME/d" /etc/hosts
+
+# Clear SSH known_hosts (by name; IP was in /etc/hosts which we just cleaned)
+ssh-keygen -R "$VM_NAME" 2>/dev/null || true
+
+echo ""
+echo "=== $VM_NAME destroyed ==="
