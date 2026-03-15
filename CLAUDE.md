@@ -65,6 +65,19 @@ After `create-dev-vm`:
 After `provision.sh`:
 - `ssh steve@<vm-name> '~/.config/yadm/test-dotfiles.sh'`
 
+## Lessons Learned (Hard-Won)
+
+These are non-obvious findings from debugging. Don't repeat these mistakes.
+
+- **Virtiofs mount ordering matters.** Incus creates parent directories as root when adding disk devices. If virtiofs mounts target `/home/steve/dev`, then `/home/steve/` gets created as `root:root` before `useradd` runs, causing permission failures. Solution: add virtiofs devices in provision.sh (after user exists), not in create-dev-vm.
+- **Two virtiofs devices can't be hot-added.** PCI slot conflict. Must stop VM, add both devices while stopped, then start. This is why provision.sh does the stop/start cycle.
+- **`incus stop --force` is a power yank.** Unflushed writes are lost. Any files written before a force-stop may not persist. Use `--timeout 60` for clean ACPI shutdown.
+- **`hostnamectl` / `timedatectl` need dbus.** The incus agent comes up before systemd is fully running. Use direct file operations (`/etc/hostname`, `/etc/localtime` symlink) instead.
+- **`images:ubuntu/24.04` has no cloud-init.** The `/cloud` variant (`images:ubuntu/24.04/cloud`) does, but we don't use cloud-init anyway. Either image works with `incus exec`.
+- **Incus containers fail on this host** (cgroup mount error). Use VMs only. For cache warming, use a throwaway VM not a container.
+- **Portability**: never hardcode IPs, timezones, bridge names, or UIDs. Discover at runtime: bridge IP via `ip addr show incusbr0`, timezone from `/etc/timezone`, VM IP from `incus list`.
+- **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Plan is to integrate into yadm bootstrap so all machines get it.
+
 ## Don'ts
 
 - Don't put VM management scripts in yadm — they belong here
