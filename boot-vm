@@ -57,5 +57,5 @@ else
     echo "$VM_NAME is already running."
 fi
 
-echo "Opening SPICE console..."
-incus console "$VM_NAME" --type vga
+echo "Opening SPICE console (detached)..."
+nohup incus console "$VM_NAME" --type vga >/dev/null 2>&1 & disown
