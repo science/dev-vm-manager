@@ -52,10 +52,12 @@ Creates and provisions KVM dev VMs using Incus, then deploys yadm dotfiles via S
 
 ## apt-cacher-ng
 
-The host runs apt-cacher-ng as a local package cache. VMs are configured to use it via the incus bridge IP. This means:
-- First VM build downloads packages from the internet (~15-20 min for cinnamon)
-- Every subsequent rebuild pulls from local cache (seconds)
-- The cache can be pre-warmed by running a throwaway VM with `apt-get install --download-only`
+apt-cacher-ng runs on **host machines only** as a local package cache server. VMs are **clients** — they do NOT run apt-cacher-ng themselves.
+
+- **Host**: runs apt-cacher-ng, serves cached .debs. Installed via yadm bootstrap (gated on `! is_vm_machine`). Listens on port 3142.
+- **VMs**: `create-dev-vm` discovers the host's incus bridge IP at runtime and configures the VM's apt to proxy through it (`/etc/apt/apt.conf.d/01proxy`). VMs never need apt-cacher-ng installed.
+- **Cache warming**: first VM build downloads from internet (~15-20 min for cinnamon). Every subsequent VM rebuild or re-provision pulls from the host's cache (seconds). Pre-warm with a throwaway VM: `apt-get install --download-only`.
+- **Multi-machine**: each host machine runs its own apt-cacher-ng instance for its own VMs. Caches are local per host.
 
 ## Testing
 
@@ -76,7 +78,7 @@ These are non-obvious findings from debugging. Don't repeat these mistakes.
 - **`images:ubuntu/24.04` has no cloud-init.** The `/cloud` variant (`images:ubuntu/24.04/cloud`) does, but we don't use cloud-init anyway. Either image works with `incus exec`.
 - **Incus containers fail on this host** (cgroup mount error). Use VMs only. For cache warming, use a throwaway VM not a container.
 - **Portability**: never hardcode IPs, timezones, bridge names, or UIDs. Discover at runtime: bridge IP via `ip addr show incusbr0`, timezone from `/etc/timezone`, VM IP from `incus list`.
-- **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Plan is to integrate into yadm bootstrap so all machines get it.
+- **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Runs on host only — VMs are clients configured by `create-dev-vm`. Do NOT install apt-cacher-ng on VMs.
 
 ## Don'ts
 

@@ -9,7 +9,7 @@ set -euo pipefail
 VM_NAME="${1:?Usage: provision.sh <vm-name>}"
 TARGET="steve@$VM_NAME"
 REPO="https://github.com/science/dotfiles.git"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
 echo "=== Provisioning $VM_NAME ==="
@@ -94,6 +94,16 @@ ssh "$TARGET" '
 echo ""
 echo "=== Running yadm bootstrap ==="
 ssh -t "$TARGET" 'YADM_INSTALL=1 yadm bootstrap'
+
+# --- Reboot (picks up new systemd services like LightDM after package install) ---
+echo ""
+echo "Rebooting $VM_NAME..."
+ssh "$TARGET" 'sudo reboot' || true
+sleep 5
+for i in $(seq 1 30); do
+    ssh -o ConnectTimeout=5 "$TARGET" true 2>/dev/null && break
+    sleep 2
+done
 
 # --- Verify ---
 echo ""

@@ -3,7 +3,7 @@
 # Usage: ./create-dev-vm <vm-name>
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
 # Ensure we have incus-admin group access (avoids needing logout/login)
@@ -122,7 +122,11 @@ incus exec "$VM_NAME" -- chmod 600 /home/steve/.ssh/authorized_keys
 incus exec "$VM_NAME" -- chown -R steve:steve /home/steve/.ssh
 
 # Set timezone (match host)
-HOST_TZ="$(cat /etc/timezone)"
+# Priority: /etc/localtime symlink → timedatectl → /etc/timezone (legacy)
+HOST_TZ="$(readlink -f /etc/localtime | sed 's|^/usr/share/zoneinfo/||')"
+if [[ "$HOST_TZ" == /* ]]; then
+    HOST_TZ="$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone)"
+fi
 incus exec "$VM_NAME" -- ln -sf "/usr/share/zoneinfo/$HOST_TZ" /etc/localtime
 incus exec "$VM_NAME" -- bash -c "echo '$HOST_TZ' > /etc/timezone"
 

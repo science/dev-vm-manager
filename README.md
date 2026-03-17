@@ -66,10 +66,12 @@ incus console dev-1 --type vga
 
 - Host: Ubuntu 24.04 with KVM support
 - Incus (installed via `setup.sh`)
-- apt-cacher-ng (optional, for fast package caching)
+- apt-cacher-ng on host (optional, for fast VM package caching — VMs are clients, not servers)
 - SSH key at `~/.ssh/id_ed25519.pub`
 - yadm dotfiles repo: `https://github.com/science/dotfiles.git`
 
 ## Relationship to yadm dotfiles
 
-This project is **not** tracked by yadm. It lives in `~/dev/dev-vm-manager/` as its own git repo. The provisioning script calls yadm to deploy and test dotfiles on the new VM. Long-term, apt-cacher-ng and desktop package installation will move into yadm bootstrap so host and VM environments stay in sync.
+This project is **not** tracked by yadm. It lives in `~/dev/dev-vm-manager/` as its own git repo. The provisioning script calls yadm to deploy and test dotfiles on the new VM.
+
+apt-cacher-ng is installed on host machines via yadm bootstrap (gated on `! is_vm_machine`). VMs are configured as clients by `create-dev-vm` at VM creation time — they proxy apt through the host's bridge IP. This means host machines serve cached packages to all their VMs without the VMs needing apt-cacher-ng themselves.

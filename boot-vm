@@ -1,0 +1,61 @@
+#!/bin/bash
+# Boot a dev VM and open the SPICE console.
+# Usage: ./boot-vm <vm-name>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+# Ensure we have incus-admin group access (avoids needing logout/login)
+if ! incus info &>/dev/null 2>&1; then
+    if id -nG | grep -qw incus-admin; then
+        exec sg incus-admin "$0 $*"
+    else
+        echo "ERROR: Not in incus-admin group. Run: sudo usermod -aG incus-admin \$(whoami) && newgrp incus-admin"
+        exit 1
+    fi
+fi
+
+VM_NAME="${1:?Usage: boot-vm <vm-name>}"
+
+# Validate VM name
+found=false
+for name in "${VM_NAMES[@]}"; do
+    [[ "$name" == "$VM_NAME" ]] && found=true && break
+done
+if ! $found; then
+    echo "ERROR: Unknown VM name '$VM_NAME'. Known: ${VM_NAMES[*]}"
+    exit 1
+fi
+
+# Check VM exists
+if ! incus info "$VM_NAME" &>/dev/null; then
+    echo "ERROR: VM '$VM_NAME' does not exist. Create it first with: ./create-dev-vm $VM_NAME"
+    exit 1
+fi
+
+# Start if not already running
+STATUS="$(incus list "$VM_NAME" --format csv -c s)"
+if [[ "$STATUS" != "RUNNING" ]]; then
+    echo "Starting $VM_NAME..."
+    incus start "$VM_NAME"
+
+    # Wait for IP so /etc/hosts is current
+    echo "Waiting for IP address..."
+    VM_IP=""
+    for i in $(seq 1 30); do
+        VM_IP="$(incus list "$VM_NAME" --format csv -c 4 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)" || true
+        [[ -n "$VM_IP" ]] && break
+        sleep 2
+    done
+    if [[ -n "$VM_IP" ]]; then
+        sudo sed -i "/$VM_NAME/d" /etc/hosts
+        echo "$VM_IP  $VM_NAME" | sudo tee -a /etc/hosts >/dev/null
+        echo "VM IP: $VM_IP"
+    fi
+else
+    echo "$VM_NAME is already running."
+fi
+
+echo "Opening SPICE console..."
+incus console "$VM_NAME" --type vga
