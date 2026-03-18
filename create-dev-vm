@@ -111,8 +111,9 @@ fi
 incus exec "$VM_NAME" -- bash -c 'echo "steve ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/steve'
 incus exec "$VM_NAME" -- chmod 440 /etc/sudoers.d/steve
 
-# Set password
-incus exec "$VM_NAME" -- chpasswd <<< 'REDACTED'
+# Set random password (SSH key auth is the real access method)
+VM_PASSWORD="$(openssl rand -base64 18)"
+incus exec "$VM_NAME" -- chpasswd <<< "steve:$VM_PASSWORD"
 
 # SSH key
 incus exec "$VM_NAME" -- mkdir -p /home/steve/.ssh
