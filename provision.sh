@@ -21,6 +21,8 @@ incus config device add "$VM_NAME" devmount disk \
     source="$HOST_DEV_DIR" path=/home/steve/dev
 incus config device add "$VM_NAME" picsmount disk \
     source="$HOST_PICTURES_DIR" path=/home/steve/Pictures
+incus config device add "$VM_NAME" claudemount disk \
+    source="$HOST_CLAUDE_DIR" path=/home/steve/.claude
 incus start "$VM_NAME"
 echo "Waiting for VM to come back..."
 for i in $(seq 1 30); do
@@ -41,10 +43,9 @@ ssh "$TARGET" 'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DE
 
 # --- Copy auth credentials from host ---
 echo "Copying auth credentials..."
-ssh "$TARGET" 'mkdir -p ~/.config/gh ~/.claude'
+ssh "$TARGET" 'mkdir -p ~/.config/gh'
 scp -q ~/.config/gh/hosts.yml "$TARGET:~/.config/gh/hosts.yml"
 scp -q ~/.claude.json "$TARGET:~/.claude.json"
-scp -q ~/.claude/.credentials.json "$TARGET:~/.claude/.credentials.json"
 
 # Verify GitHub auth
 if ! ssh "$TARGET" 'gh auth status' 2>/dev/null; then
