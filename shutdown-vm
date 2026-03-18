@@ -1,6 +1,6 @@
 #!/bin/bash
-# Gracefully shut down a dev VM.
-# Usage: ./shutdown-vm <vm-name>
+# Gracefully shut down one or more dev VMs.
+# Usage: ./shutdown-vm <vm-name> [vm-name...]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -16,41 +16,48 @@ if ! incus info &>/dev/null 2>&1; then
     fi
 fi
 
-VM_NAME="${1:?Usage: shutdown-vm <vm-name>}"
+[[ $# -eq 0 ]] && echo "Usage: shutdown-vm <vm-name> [vm-name...]" && exit 1
 
-# Validate VM name
-found=false
-for name in "${VM_NAMES[@]}"; do
-    [[ "$name" == "$VM_NAME" ]] && found=true && break
-done
-if ! $found; then
-    echo "ERROR: Unknown VM name '$VM_NAME'. Known: ${VM_NAMES[*]}"
-    exit 1
-fi
-
-STATUS="$(incus list "$VM_NAME" --format csv -c s 2>/dev/null || echo "MISSING")"
-if [[ "$STATUS" == "RUNNING" ]]; then
-    echo "Shutting down $VM_NAME..."
-    # Use systemd poweroff via incus exec instead of ACPI power button.
-    # Cinnamon's csd-media-keys registers a block inhibitor on handle-power-key
-    # which prevents logind from acting on the ACPI signal, so 'incus stop'
-    # times out when a desktop session is active.
-    # --check-inhibitors=no skips delay inhibitors (e.g. unattended-upgrades).
-    incus exec "$VM_NAME" -- systemctl poweroff --check-inhibitors=no
-    # Wait for VM to actually stop
-    for i in $(seq 1 60); do
-        s="$(incus list "$VM_NAME" --format csv -c s 2>/dev/null)"
-        [[ "$s" == "STOPPED" ]] && break
-        sleep 1
+errors=0
+for VM_NAME in "$@"; do
+    # Validate VM name
+    found=false
+    for name in "${VM_NAMES[@]}"; do
+        [[ "$name" == "$VM_NAME" ]] && found=true && break
     done
-    if [[ "$(incus list "$VM_NAME" --format csv -c s 2>/dev/null)" != "STOPPED" ]]; then
-        echo "ERROR: $VM_NAME did not stop within 60s"
-        exit 1
+    if ! $found; then
+        echo "ERROR: Unknown VM name '$VM_NAME'. Known: ${VM_NAMES[*]}"
+        errors=1
+        continue
     fi
-    echo "$VM_NAME stopped."
-elif [[ "$STATUS" == "STOPPED" ]]; then
-    echo "$VM_NAME is already stopped."
-else
-    echo "ERROR: VM '$VM_NAME' does not exist."
-    exit 1
-fi
+
+    STATUS="$(incus list "$VM_NAME" --format csv -c s 2>/dev/null || echo "MISSING")"
+    if [[ "$STATUS" == "RUNNING" ]]; then
+        echo "Shutting down $VM_NAME..."
+        # Use systemd poweroff via incus exec instead of ACPI power button.
+        # Cinnamon's csd-media-keys registers a block inhibitor on handle-power-key
+        # which prevents logind from acting on the ACPI signal, so 'incus stop'
+        # times out when a desktop session is active.
+        # --check-inhibitors=no skips delay inhibitors (e.g. unattended-upgrades).
+        incus exec "$VM_NAME" -- systemctl poweroff --check-inhibitors=no
+        # Wait for VM to actually stop
+        for i in $(seq 1 60); do
+            s="$(incus list "$VM_NAME" --format csv -c s 2>/dev/null)"
+            [[ "$s" == "STOPPED" ]] && break
+            sleep 1
+        done
+        if [[ "$(incus list "$VM_NAME" --format csv -c s 2>/dev/null)" != "STOPPED" ]]; then
+            echo "ERROR: $VM_NAME did not stop within 60s"
+            errors=1
+            continue
+        fi
+        echo "$VM_NAME stopped."
+    elif [[ "$STATUS" == "STOPPED" ]]; then
+        echo "$VM_NAME is already stopped."
+    else
+        echo "ERROR: VM '$VM_NAME' does not exist."
+        errors=1
+    fi
+done
+
+exit $errors
