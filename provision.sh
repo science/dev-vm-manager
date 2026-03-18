@@ -41,9 +41,10 @@ ssh "$TARGET" 'sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo DE
 
 # --- Copy auth credentials from host ---
 echo "Copying auth credentials..."
-ssh "$TARGET" 'mkdir -p ~/.config/gh'
+ssh "$TARGET" 'mkdir -p ~/.config/gh ~/.claude'
 scp -q ~/.config/gh/hosts.yml "$TARGET:~/.config/gh/hosts.yml"
 scp -q ~/.claude.json "$TARGET:~/.claude.json"
+scp -q ~/.claude/.credentials.json "$TARGET:~/.claude/.credentials.json"
 
 # Verify GitHub auth
 if ! ssh "$TARGET" 'gh auth status' 2>/dev/null; then
