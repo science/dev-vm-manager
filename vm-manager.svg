@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Monitor body -->
+  <rect x="6" y="8" width="52" height="36" rx="3" fill="#2d2d2d" stroke="#4a9eff" stroke-width="2"/>
+  <!-- Screen -->
+  <rect x="10" y="12" width="44" height="28" rx="1" fill="#1a1a2e"/>
+  <!-- Terminal prompt lines -->
+  <text x="14" y="24" font-family="monospace" font-size="7" fill="#4a9eff">$</text>
+  <rect x="20" y="19" width="16" height="5" rx="1" fill="#4a9eff" opacity="0.6"/>
+  <text x="14" y="34" font-family="monospace" font-size="7" fill="#50fa7b">></text>
+  <rect x="20" y="29" width="10" height="5" rx="1" fill="#50fa7b" opacity="0.5"/>
+  <!-- Blinking cursor -->
+  <rect x="32" y="29" width="4" height="5" rx="1" fill="#50fa7b"/>
+  <!-- Stand -->
+  <rect x="26" y="44" width="12" height="4" fill="#4a9eff"/>
+  <rect x="22" y="48" width="20" height="3" rx="1" fill="#4a9eff"/>
+  <!-- VM indicator dots -->
+  <circle cx="48" cy="15" r="2" fill="#50fa7b"/>
+  <circle cx="48" cy="20" r="2" fill="#50fa7b"/>
+</svg>

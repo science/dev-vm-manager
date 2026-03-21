@@ -23,6 +23,9 @@ When using AI coding agents (Claude Code, etc.) for aggressive development, you 
 # Create a VM (end-to-end: create, configure, provision, test)
 create-dev-vm dev-1
 
+# Interactive control panel (status, start/stop, attach console)
+vm-manager
+
 # Boot / shutdown (supports multiple VMs)
 boot-vm dev-1 dev-2
 shutdown-vm dev-1 dev-2
@@ -71,12 +74,13 @@ ssh steve@dev-1
 
 | Script | Purpose |
 |--------|---------|
+| `vm-manager` | Interactive TUI — VM status, start/stop, attach console |
 | `create-dev-vm` | Create and provision a VM end-to-end |
 | `destroy-dev-vm` | Tear down a VM cleanly |
 | `boot-vm` | Start VM(s), update /etc/hosts, open SPICE console |
 | `shutdown-vm` | Graceful shutdown via systemd (works with Cinnamon desktop) |
 | `provision.sh` | yadm deployment (called by create-dev-vm) |
-| `install.sh` | Symlink scripts into ~/.local/bin |
+| `install.sh` | Symlink scripts into ~/.local/bin, install desktop launcher |
 | `setup.sh` | Install Incus and dependencies |
 | `config.sh` | Shared configuration (VM names, resources, paths) |
 
@@ -92,7 +96,7 @@ ssh steve@dev-1
 
 - **No cloud-init.** VM configuration uses `incus exec` with standard OS commands. This avoids cloud-init's YAML quirks and ordering issues.
 - **yadm is the source of truth.** These scripts install only the bare minimum (user, SSH, openssh-server). Everything else — desktop, dev tools, shell config — comes from yadm bootstrap.
-- **Virtiofs over 9p.** Shared directories use virtiofs for near-native performance. Devices are added after user creation to avoid mount-point permission issues.
+- **Virtiofs over 9p.** Shared directories use virtiofs for near-native performance. Devices are added after user creation to avoid mount-point permission issues. Note: Incus 6.0 runs virtiofsd with `--cache=never`, which means `execve()` fails on virtiofs-mounted files — use `bash script.sh` instead of `./script.sh`, and redirect build outputs to local disk (e.g. `CARGO_TARGET_DIR`).
 - **systemctl poweroff over ACPI.** Cinnamon's settings daemon blocks the ACPI power button signal, so `shutdown-vm` uses `incus exec systemctl poweroff` instead of `incus stop`.
 - **Portable.** No hardcoded IPs, timezones, or bridge names. Everything is discovered at runtime.
 

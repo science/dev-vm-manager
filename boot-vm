@@ -62,7 +62,7 @@ for VM_NAME in "$@"; do
     fi
 
     echo "Opening SPICE console for $VM_NAME (detached)..."
-    nohup incus console "$VM_NAME" --type vga >/dev/null 2>&1 & disown
+    setsid incus console "$VM_NAME" --type vga >/dev/null 2>&1 &
 done
 
 exit $errors

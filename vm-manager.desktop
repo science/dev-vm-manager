@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=VM Manager
+Comment=Control dev VMs (start, stop, attach console)
+Exec=gnome-terminal -- %INSTALL_DIR%/vm-manager
+Icon=%ICONS_DIR%/vm-manager.svg
+Terminal=false
+Categories=System;Utility;
+Keywords=vm;virtual;machine;incus;
