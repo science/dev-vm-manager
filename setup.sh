@@ -13,7 +13,36 @@ else
     sudo apt install -y incus
 fi
 
-# 2. Ensure user is in incus-admin group
+# 2. Fix virtiofsd exec on virtiofs mounts
+# Incus 6.0 hardcodes --cache=never for virtiofsd, which prevents mmap and
+# breaks binary execution on virtiofs mounts (EFAULT). This wrapper swaps
+# --cache=never for --cache=auto. Uses dpkg-divert so package updates install
+# the real binary to virtiofsd.real, leaving the wrapper intact.
+# Can be removed when Ubuntu ships Incus 7.0+ (which has io.cache per-device).
+if dpkg-divert --list 2>/dev/null | grep -q '/usr/libexec/virtiofsd'; then
+    echo "virtiofsd wrapper: already installed"
+else
+    echo "Installing virtiofsd exec wrapper..."
+    sudo dpkg-divert --add --rename --divert /usr/libexec/virtiofsd.real /usr/libexec/virtiofsd
+    sudo tee /usr/libexec/virtiofsd > /dev/null <<'WRAPPER'
+#!/bin/bash
+# Wrapper: Incus 6.0 hardcodes --cache=never which prevents mmap/exec on
+# virtiofs mounts. Swap to --cache=auto for host-guest coherency with mmap.
+args=()
+for arg in "$@"; do
+    if [[ "$arg" == "--cache=never" ]]; then
+        args+=("--cache=auto")
+    else
+        args+=("$arg")
+    fi
+done
+exec /usr/libexec/virtiofsd.real "${args[@]}"
+WRAPPER
+    sudo chmod +x /usr/libexec/virtiofsd
+    echo "virtiofsd wrapper: installed"
+fi
+
+# 3. Ensure user is in incus-admin group
 if id -nG | grep -qw incus-admin; then
     echo "User $(whoami): in incus-admin group"
 else
@@ -22,7 +51,7 @@ else
     echo "NOTE: Run 'newgrp incus-admin' or log out/in for group to take effect."
 fi
 
-# 3. Initialize incus if not already done
+# 4. Initialize incus if not already done
 if sg incus-admin -c "incus info" &>/dev/null 2>&1; then
     echo "Incus: initialized"
 else
@@ -30,7 +59,7 @@ else
     sg incus-admin -c "incus admin init --minimal"
 fi
 
-# 4. apt-cacher-ng (optional but recommended for fast VM rebuilds)
+# 5. apt-cacher-ng (optional but recommended for fast VM rebuilds)
 if dpkg -s apt-cacher-ng &>/dev/null 2>&1; then
     echo "apt-cacher-ng: installed"
     if systemctl is-active --quiet apt-cacher-ng; then
@@ -45,7 +74,7 @@ else
     echo "Install it with: sudo apt install apt-cacher-ng"
 fi
 
-# 5. Cache base VM image
+# 6. Cache base VM image
 source "$(dirname "$0")/config.sh"
 if sg incus-admin -c "incus image list --format csv -c l" | grep -q "^${INCUS_IMAGE_ALIAS}$"; then
     echo "Base image: cached as $INCUS_IMAGE_ALIAS"
@@ -54,7 +83,7 @@ else
     sg incus-admin -c "incus image copy $INCUS_IMAGE_REMOTE local: --alias $INCUS_IMAGE_ALIAS --vm --auto-update=false"
 fi
 
-# 6. Verify SSH key exists
+# 7. Verify SSH key exists
 if [[ -f "$SSH_PUBKEY_PATH" ]]; then
     echo "SSH key: $SSH_PUBKEY_PATH"
 else

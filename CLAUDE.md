@@ -77,11 +77,13 @@ These are non-obvious findings from debugging. Don't repeat these mistakes.
 - **`hostnamectl` / `timedatectl` need dbus.** The incus agent comes up before systemd is fully running. Use direct file operations (`/etc/hostname`, `/etc/localtime` symlink) instead.
 - **`images:ubuntu/24.04` has no cloud-init.** The `/cloud` variant (`images:ubuntu/24.04/cloud`) does, but we don't use cloud-init anyway. Either image works with `incus exec`.
 - **Incus containers fail on this host** (cgroup mount error). Use VMs only. For cache warming, use a throwaway VM not a container.
+- **Virtiofs exec requires a virtiofsd cache fix.** Incus 6.0 hardcodes `--cache=never` for virtiofsd, which disables mmap and breaks binary execution (EFAULT/"Bad address"). Mount-level flags (`raw.mount.options=exec`, `security.noexec`) don't help — the problem is at the virtiofsd process level. Fixed via a `dpkg-divert` wrapper in `setup.sh` that swaps `--cache=never` for `--cache=auto`. Can be removed when Ubuntu ships Incus 7.0+ (which has `io.cache` per-device).
 - **Portability**: never hardcode IPs, timezones, bridge names, or UIDs. Discover at runtime: bridge IP via `ip addr show incusbr0`, timezone from `/etc/timezone`, VM IP from `incus list`.
 - **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Runs on host only — VMs are clients configured by `create-dev-vm`. Do NOT install apt-cacher-ng on VMs.
 
 ## Don'ts
 
+- **Don't stop or restart running VMs without explicit user permission.** If you didn't start it, assume the user is actively working in it. Always ask first.
 - Don't put VM management scripts in yadm — they belong here
 - Don't use cloud-init — use `incus exec` for VM configuration
 - Don't hardcode IPs — use DHCP with runtime discovery

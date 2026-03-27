@@ -18,8 +18,7 @@ echo "=== Provisioning $VM_NAME ==="
 echo "Adding shared directories..."
 incus stop "$VM_NAME" --timeout 60
 incus config device add "$VM_NAME" devmount disk \
-    source="$HOST_DEV_DIR" path=/home/steve/dev \
-    raw.mount.options=exec
+    source="$HOST_DEV_DIR" path=/home/steve/dev
 incus config device add "$VM_NAME" picsmount disk \
     source="$HOST_PICTURES_DIR" path=/home/steve/Pictures
 incus config device add "$VM_NAME" claudemount disk \
