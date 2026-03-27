@@ -108,7 +108,8 @@ do_action() {
                 draw
                 "$SCRIPT_DIR/boot-vm" "${VM_NAMES[0]}" &>/dev/null &
                 wait $!
-                msg="${VM_NAMES[0]} started."
+                setsid incus console "${VM_NAMES[0]}" --type vga >/dev/null 2>&1 &
+                msg="${VM_NAMES[0]} started. Console opened."
             fi
             ;;
         2)
@@ -139,7 +140,8 @@ do_action() {
                 draw
                 "$SCRIPT_DIR/boot-vm" "${VM_NAMES[1]}" &>/dev/null &
                 wait $!
-                msg="${VM_NAMES[1]} started."
+                setsid incus console "${VM_NAMES[1]}" --type vga >/dev/null 2>&1 &
+                msg="${VM_NAMES[1]} started. Console opened."
             fi
             ;;
         4)
