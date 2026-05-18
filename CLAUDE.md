@@ -54,12 +54,18 @@ Creates and provisions KVM dev VMs using Incus, then deploys yadm dotfiles via S
 
 apt-cacher-ng runs on **host machines only** as a local package cache server. VMs are **clients** — they do NOT run apt-cacher-ng themselves.
 
-- **Host**: runs apt-cacher-ng, serves cached .debs. Installed via yadm bootstrap (gated on `! is_vm_machine`). Listens on port 3142.
-- **VMs**: `create-dev-vm` discovers the host's incus bridge IP at runtime and configures the VM's apt to proxy through it (`/etc/apt/apt.conf.d/01proxy`). VMs never need apt-cacher-ng installed.
-- **Cache warming**: first VM build downloads from internet (~15-20 min for cinnamon). Every subsequent VM rebuild or re-provision pulls from the host's cache (seconds). Pre-warm with a throwaway VM: `apt-get install --download-only`.
+- **Host**: package installed but service **disabled by default**. `create-dev-vm` and `provision.sh` flip it on for the duration of a VM build via `acng-mode on/off` and revert on exit (EXIT trap). Listens on port 3142 only while on.
+- **acng-mode**: `~/.local/bin/acng-mode {on|off|status}` is the toggle. `on` starts the service and writes `/etc/apt/apt.conf.d/01acng`; `off` removes the apt conf and stops the service. Idempotent. Tested at `tests/acng-mode-test.sh`.
+- **Wrapping pattern**: each script records whether acng was already on; if it was off, the script turns it on, sets `ACNG_OWNED=1`, and the EXIT trap reverts. If acng was already on (someone else owns it, e.g. nested provision.sh inside create-dev-vm), the script leaves it alone. This makes nested invocations and external `acng-mode on` sessions safe.
+- **VMs**: when host acng is on, `create-dev-vm` and `provision.sh` write `/etc/apt/apt.conf.d/01proxy` in the VM pointing at the bridge IP. The EXIT trap also removes that file from the VM if the script owned the acng cycle, so a VM whose host acng is off doesn't try to proxy through a dead service.
+- **Cache warming**: first VM build downloads from internet (~15-20 min for cinnamon). Every subsequent VM rebuild or re-provision pulls from the host's cache (seconds). Pre-warm with a throwaway VM: `acng-mode on && apt-get install --download-only ... ; acng-mode off`.
 - **Multi-machine**: each host machine runs its own apt-cacher-ng instance for its own VMs. Caches are local per host.
+- **Why on-demand**: when always-on, acng's worker pool got stuck most days during `apt-daily.timer` and returned 503 to every subsequent apt operation until restarted. Bounded on-windows driven by VM rebuilds avoid that failure mode entirely. See `apt-cacher-ng-ondemand.md` for the full motivation.
 
 ## Testing
+
+Unit tests (sandboxed, no real services touched):
+- `tests/acng-mode-test.sh` — exercises `acng-mode` state machine and the EXIT-trap wrapping pattern. Uses a fake `systemctl` and a tmp `01acng` path injected via `ACNG_*` env hooks.
 
 After `create-dev-vm`:
 - Smoke test runs automatically (VM exists, running, has IP, SSH works)

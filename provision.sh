@@ -14,6 +14,29 @@ source "$SCRIPT_DIR/config.sh"
 
 echo "=== Provisioning $VM_NAME ==="
 
+# --- acng (apt-cacher-ng) on-demand wrapping ---
+# Same pattern as create-dev-vm. When create-dev-vm is the caller, acng will
+# already be on and we leave it alone. When provision.sh is invoked directly,
+# we flip it on for the duration and off again at exit.
+ACNG_MODE_BIN="$SCRIPT_DIR/acng-mode"
+ACNG_OWNED=0
+if [[ -x "$ACNG_MODE_BIN" ]]; then
+    if [[ "$("$ACNG_MODE_BIN" status 2>/dev/null || true)" != "on" ]]; then
+        echo "Starting apt-cacher-ng for provisioning..."
+        "$ACNG_MODE_BIN" on
+        ACNG_OWNED=1
+    fi
+fi
+
+cleanup_acng() {
+    [[ $ACNG_OWNED -eq 1 ]] || return 0
+    if incus info "$VM_NAME" >/dev/null 2>&1; then
+        incus exec "$VM_NAME" -- rm -f /etc/apt/apt.conf.d/01proxy 2>/dev/null || true
+    fi
+    "$ACNG_MODE_BIN" off >/dev/null 2>&1 || true
+}
+trap cleanup_acng EXIT
+
 # --- Add shared directories (stop/start required for multiple virtiofs devices) ---
 echo "Adding shared directories..."
 incus stop "$VM_NAME" --timeout 60
@@ -36,6 +59,17 @@ if ! ssh -o ConnectTimeout=10 "$TARGET" true 2>/dev/null; then
     exit 1
 fi
 echo "SSH is up."
+
+# --- Ensure VM apt proxy config when host acng is on ---
+# Idempotent: re-provisioning a VM that lost its 01proxy (e.g. after a previous
+# on-demand cycle cleaned it up) gets it back so the next apt operation is fast.
+if [[ -x "$ACNG_MODE_BIN" ]] \
+    && [[ "$("$ACNG_MODE_BIN" status 2>/dev/null || true)" == "on" ]]; then
+    BRIDGE_IP="$(ip -4 addr show incusbr0 2>/dev/null | grep -oP 'inet \K[\d.]+' || true)"
+    if [[ -n "$BRIDGE_IP" ]]; then
+        ssh "$TARGET" "echo 'Acquire::http::Proxy \"http://${BRIDGE_IP}:${APT_PROXY_PORT}\";' | sudo tee /etc/apt/apt.conf.d/01proxy >/dev/null"
+    fi
+fi
 
 # --- Install yadm + gh ---
 echo "Installing yadm and gh..."

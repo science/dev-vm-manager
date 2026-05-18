@@ -8,7 +8,7 @@ INSTALL_DIR="$HOME/.local/bin"
 
 mkdir -p "$INSTALL_DIR"
 
-scripts=(boot-vm shutdown-vm create-dev-vm destroy-dev-vm provision.sh vm-manager)
+scripts=(boot-vm shutdown-vm create-dev-vm destroy-dev-vm provision.sh vm-manager acng-mode)
 
 for script in "${scripts[@]}"; do
     src="$SCRIPT_DIR/$script"
