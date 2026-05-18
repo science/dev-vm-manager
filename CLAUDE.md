@@ -39,16 +39,17 @@ Creates and provisions KVM dev VMs using Incus, then deploys yadm dotfiles via S
 
 ## provision.sh Responsibilities
 
-1. Stop VM, add virtiofs shared directories (~/dev, ~/Pictures), restart
+1. Stop VM, add virtiofs shared directories (~/dev, ~/Pictures, ~/.claude), restart
 2. Wait for SSH
 3. Install yadm + gh
 4. Copy GitHub auth and Claude auth from host
 5. Set up git credential helper
 6. `yadm clone` (or pull if exists)
-7. Decrypt secrets (interactive GPG — the only manual step)
-8. Re-setup credential helper (yadm checkout may overwrite .gitconfig)
-9. `YADM_INSTALL=1 yadm bootstrap`
-10. Run test suite (`~/.config/yadm/test-dotfiles.sh`)
+7. Mark the 4 yadm-tracked `.claude/*` files as `skip-worktree` (see below)
+8. Decrypt secrets (interactive GPG — the only manual step)
+9. Re-setup credential helper (yadm checkout may overwrite .gitconfig)
+10. `YADM_INSTALL=1 yadm bootstrap`
+11. Run test suite (`~/.config/yadm/test-dotfiles.sh`)
 
 ## apt-cacher-ng
 
@@ -86,6 +87,7 @@ These are non-obvious findings from debugging. Don't repeat these mistakes.
 - **Virtiofs exec requires a virtiofsd cache fix.** Incus 6.0 hardcodes `--cache=never` for virtiofsd, which disables mmap and breaks binary execution (EFAULT/"Bad address"). Mount-level flags (`raw.mount.options=exec`, `security.noexec`) don't help — the problem is at the virtiofsd process level. Fixed via a `dpkg-divert` wrapper in `setup.sh` that swaps `--cache=never` for `--cache=auto`. Can be removed when Ubuntu ships Incus 7.0+ (which has `io.cache` per-device).
 - **Portability**: never hardcode IPs, timezones, bridge names, or UIDs. Discover at runtime: bridge IP via `ip addr show incusbr0`, timezone from `/etc/timezone`, VM IP from `incus list`.
 - **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Runs on host only — VMs are clients configured by `create-dev-vm`. Do NOT install apt-cacher-ng on VMs.
+- **virtiofs + yadm double-tracking causes phantom conflicts.** `~/.claude/` is virtiofs-shared from the host into every VM, so the 4 yadm-tracked files inside it (`CLAUDE.md`, `keybindings.json`, `settings.json`, `statusline.sh`) physically *are* the host's bytes. Each VM's yadm has an independent HEAD commit, so a routine `yadm pull` on a VM diffs the live shared file against its stale HEAD and flags fake conflicts (which then write conflict markers into the host's file via virtiofs — making the mess worse). Fix: `yadm update-index --skip-worktree` on those 4 paths on every VM. The host stays the sole canonical tracker; VMs ignore those paths and rely on virtiofs for content. provision.sh sets this automatically after `yadm clone/pull`. Same trap will apply to any future file added to yadm under a virtiofs-shared path — extend the skip-worktree list if so.
 
 ## Don'ts
 

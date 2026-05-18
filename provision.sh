@@ -105,6 +105,20 @@ ssh "$TARGET" "
     fi
 "
 
+# --- Mark virtiofs-shared .claude/* as skip-worktree ---
+# ~/.claude/ is virtiofs-mounted from the host (see claudemount above), so the
+# 4 yadm-tracked files under it are physically the host's bytes. Without this
+# flag, every `yadm pull` on the VM diffs the live shared file against the VM's
+# stale yadm HEAD and generates phantom conflicts. skip-worktree tells the VM's
+# yadm to ignore those paths; the host stays the sole canonical tracker.
+ssh "$TARGET" '
+    yadm update-index --skip-worktree \
+        .claude/CLAUDE.md \
+        .claude/keybindings.json \
+        .claude/settings.json \
+        .claude/statusline.sh
+'
+
 # --- Decrypt secrets (interactive GPG passphrase) ---
 echo ""
 echo "=== GPG passphrase required (Bitwarden) ==="
