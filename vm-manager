@@ -27,6 +27,16 @@ RESET='\033[0m'
 
 msg=""
 
+# Ask for Y/N confirmation. Returns 0 if confirmed, 1 otherwise.
+confirm() {
+    local prompt="$1"
+    echo
+    echo -ne "  ${YELLOW}${prompt} [y/N]${RESET} "
+    local ans
+    read -rsn1 ans
+    [[ "$ans" == "y" || "$ans" == "Y" ]]
+}
+
 get_status() {
     local vm="$1"
     incus list "$vm" --format csv -c s 2>/dev/null || echo "NOT FOUND"
@@ -98,6 +108,10 @@ do_action() {
             local status
             status="$(get_status "${VM_NAMES[0]}")"
             if [[ "$status" == "RUNNING" ]]; then
+                if ! confirm "Stop ${VM_NAMES[0]}?"; then
+                    msg="Stop cancelled."
+                    return
+                fi
                 msg="Stopping ${VM_NAMES[0]}..."
                 draw
                 "$SCRIPT_DIR/shutdown-vm" "${VM_NAMES[0]}" &>/dev/null &
@@ -130,6 +144,10 @@ do_action() {
             local status
             status="$(get_status "${VM_NAMES[1]}")"
             if [[ "$status" == "RUNNING" ]]; then
+                if ! confirm "Stop ${VM_NAMES[1]}?"; then
+                    msg="Stop cancelled."
+                    return
+                fi
                 msg="Stopping ${VM_NAMES[1]}..."
                 draw
                 "$SCRIPT_DIR/shutdown-vm" "${VM_NAMES[1]}" &>/dev/null &
