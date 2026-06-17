@@ -34,6 +34,18 @@ for VM_NAME in "$@"; do
     STATUS="$(incus list "$VM_NAME" --format csv -c s 2>/dev/null || echo "MISSING")"
     if [[ "$STATUS" == "RUNNING" ]]; then
         echo "Shutting down $VM_NAME..."
+
+        # Pre-emptively tear down the graphical session BEFORE poweroff. The
+        # SPICE/virtio-gpu stack intermittently wedges Xorg in uninterruptible
+        # (D) state during the final shutdown teardown, which hangs poweroff
+        # indefinitely. Detaching the host's console client and stopping the
+        # display-manager while the guest is still healthy avoids that path.
+        # Both are best-effort: a headless VM has neither.
+        #   1) detach the host from the VM (kill the host-side SPICE console)
+        pkill -f "incus console $VM_NAME" 2>/dev/null || true
+        #   2) stop the in-guest display-manager (Xorg/cinnamon) cleanly
+        timeout 15 incus exec "$VM_NAME" -- systemctl stop display-manager 2>/dev/null || true
+
         # Use systemd poweroff via incus exec instead of ACPI power button.
         # Cinnamon's csd-media-keys registers a block inhibitor on handle-power-key
         # which prevents logind from acting on the ACPI signal, so 'incus stop'

@@ -53,9 +53,19 @@ for VM_NAME in "$@"; do
             sleep 2
         done
         if [[ -n "$VM_IP" ]]; then
-            sudo sed -i "/$VM_NAME/d" /etc/hosts
-            echo "$VM_IP  $VM_NAME" | sudo tee -a /etc/hosts >/dev/null
             echo "VM IP: $VM_IP"
+            # Update /etc/hosts so 'ssh <vm>' resolves. This needs sudo, so keep
+            # it non-fatal: the VM has already started, and a failed hosts update
+            # must not fail the boot. Never block on an auth prompt in a
+            # non-interactive context (e.g. the integration test) -- only try
+            # interactive sudo when we have a TTY or passwordless sudo.
+            if sudo -n true 2>/dev/null || [[ -t 0 ]]; then
+                { sudo sed -i "/$VM_NAME/d" /etc/hosts \
+                    && echo "$VM_IP  $VM_NAME" | sudo tee -a /etc/hosts >/dev/null; } \
+                    || echo "  WARNING: could not update /etc/hosts for $VM_NAME."
+            else
+                echo "  NOTE: skipped /etc/hosts update (sudo needs auth, non-interactive)."
+            fi
         fi
     else
         echo "$VM_NAME is already running."

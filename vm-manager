@@ -1,7 +1,11 @@
 #!/bin/bash
 # VM Manager — simple TUI for controlling dev VMs.
 # Shows status and provides single-keystroke start/stop/attach actions.
-set -euo pipefail
+#
+# NOTE: deliberately NOT using 'set -e'. This is a long-running interactive
+# loop, and a transient non-zero from a subcommand (incus, clear, read, a
+# wedged shutdown) must surface as a message, never tear down the whole TUI.
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
@@ -38,8 +42,18 @@ confirm() {
 }
 
 get_status() {
-    local vm="$1"
-    incus list "$vm" --format csv -c s 2>/dev/null || echo "NOT FOUND"
+    local vm="$1" out s
+    # Exact-name match (incus list treats the arg as a filter that can match
+    # substrings), and a single retry: a transient/slow incus query can return
+    # empty, and we must NOT misreport that as a non-running state.
+    out="$(incus list "$vm" --format csv --columns ns 2>/dev/null)"
+    s="$(awk -F, -v n="$vm" '$1==n {print $2}' <<<"$out")"
+    if [[ -z "$s" ]]; then
+        sleep 0.3
+        out="$(incus list "$vm" --format csv --columns ns 2>/dev/null)"
+        s="$(awk -F, -v n="$vm" '$1==n {print $2}' <<<"$out")"
+    fi
+    printf '%s' "${s:-UNKNOWN}"
 }
 
 color_status() {
@@ -47,6 +61,7 @@ color_status() {
     case "$status" in
         RUNNING)  echo -e "${GREEN}RUNNING${RESET}" ;;
         STOPPED)  echo -e "${RED}STOPPED${RESET}" ;;
+        UNKNOWN)  echo -e "${YELLOW}UNKNOWN (incus query failed)${RESET}" ;;
         *)        echo -e "${YELLOW}${status}${RESET}" ;;
     esac
 }
@@ -58,7 +73,11 @@ draw() {
     echo
 
     # Status table
-    local i=1
+    # NOTE: 'vm' MUST be local. bash uses dynamic scoping, so without this the
+    # for-loops below would clobber the caller's $vm -- stop_vm/start_vm/
+    # force_stop_vm set local vm=<target> and call draw() before acting on it,
+    # which would otherwise leave $vm pointing at the LAST VM in VM_NAMES.
+    local i=1 vm
     for vm in "${VM_NAMES[@]}"; do
         local status
         status="$(get_status "$vm")"
@@ -101,92 +120,160 @@ draw() {
     echo -n "  > "
 }
 
+attach_console() {
+    setsid incus console "$1" --type vga >/dev/null 2>&1 &
+}
+
+# Start a VM and report its real post-start state.
+start_vm() {
+    local vm="$1"
+    msg="Starting ${vm}..."
+    draw
+    # boot-vm starts the VM and opens the SPICE console itself. Judge success by
+    # the VM's actual state, not boot-vm's exit code -- boot-vm can exit non-zero
+    # on a non-fatal step (e.g. the sudo /etc/hosts update) while the VM itself
+    # started fine.
+    "$SCRIPT_DIR/boot-vm" "$vm" >/dev/null 2>&1 || true
+    if [[ "$(get_status "$vm")" == "RUNNING" ]]; then
+        msg="${vm} started. Console opened."
+    else
+        msg="${vm} failed to start. Check: incus info --show-log ${vm}"
+    fi
+}
+
+# Gracefully stop a VM; on a 60s timeout, offer an escalating force-stop.
+stop_vm() {
+    local vm="$1"
+    msg="Stopping ${vm} (graceful, up to 60s)..."
+    draw
+    if "$SCRIPT_DIR/shutdown-vm" "$vm" >/dev/null 2>&1; then
+        msg="${vm} stopped."
+        return
+    fi
+    # shutdown-vm exits non-zero if the VM didn't stop in time (it never
+    # force-stops on its own). Re-check in case it stopped right at the buzzer.
+    if [[ "$(get_status "$vm")" == "STOPPED" ]]; then
+        msg="${vm} stopped."
+        return
+    fi
+    msg="${vm} did NOT stop after 60s (still $(get_status "$vm"))."
+    draw
+    if confirm "Force shutdown ${vm}? Tries a synced hard power-off, then a power-cut."; then
+        force_stop_vm "$vm"
+    else
+        msg="${vm} left running (force cancelled)."
+    fi
+}
+
+# Escalating force-stop for a wedged VM. The usual cause is Xorg stuck on the
+# virtio-gpu queue behind an attached SPICE console, which blocks clean
+# shutdown (and a D-state process can't be killed). So we (1) close the console
+# so the GPU queue can drain, (2) sync disks and issue an in-guest hard poweroff
+# that bypasses wedged units, and only (3) cut power via incus if the guest is
+# truly unreachable.
+force_stop_vm() {
+    local vm="$1"
+
+    msg="Force-stopping ${vm}: closing console, flushing disks..."
+    draw
+    # The usual cause of a hung shutdown is a wedged graphical session (Xorg
+    # stuck on the virtio-gpu queue). Closing the SPICE console lets that queue
+    # drain, which sometimes unblocks the in-progress graceful shutdown.
+    pkill -f "incus console ${vm}" 2>/dev/null || true
+
+    # Best-effort, bounded: if the guest agent still responds, sync disks and
+    # issue a direct kernel poweroff (-ff bypasses wedged units). This cleanly
+    # stops a VM whose graceful shutdown was merely blocked (e.g. an inhibitor);
+    # if the guest is truly wedged the agent won't answer and 'timeout' caps the
+    # wait so the TUI never stalls.
+    timeout 10 incus exec "$vm" -- sh -c 'sync; systemctl poweroff -ff --check-inhibitors=no' >/dev/null 2>&1 || true
+    local i
+    for i in $(seq 1 6); do
+        if [[ "$(get_status "$vm")" == "STOPPED" ]]; then
+            msg="${vm} force-stopped (disks synced first)."
+            return
+        fi
+        sleep 1
+    done
+
+    # Power-cut. A graceful shutdown that timed out is already stuck at its final
+    # step (services stopped, filesystems remounted read-only), so this is the
+    # safe last resort rather than a yank on a live VM.
+    msg="${vm} unresponsive; cutting power (incus stop --force)..."
+    draw
+    if incus stop "$vm" --force >/dev/null 2>&1; then
+        msg="${vm} force-stopped via power-cut."
+    else
+        msg="ERROR: could not stop ${vm}. See: incus info --show-log ${vm}"
+    fi
+}
+
 do_action() {
     local key="$1"
     case "$key" in
-        1)
-            local status
-            status="$(get_status "${VM_NAMES[0]}")"
-            if [[ "$status" == "RUNNING" ]]; then
-                if ! confirm "Stop ${VM_NAMES[0]}?"; then
-                    msg="Stop cancelled."
-                    return
-                fi
-                msg="Stopping ${VM_NAMES[0]}..."
-                draw
-                "$SCRIPT_DIR/shutdown-vm" "${VM_NAMES[0]}" &>/dev/null &
-                wait $!
-                msg="${VM_NAMES[0]} stopped."
-            else
-                msg="Starting ${VM_NAMES[0]}..."
-                draw
-                "$SCRIPT_DIR/boot-vm" "${VM_NAMES[0]}" &>/dev/null &
-                wait $!
-                setsid incus console "${VM_NAMES[0]}" --type vga >/dev/null 2>&1 &
-                msg="${VM_NAMES[0]} started. Console opened."
-            fi
-            ;;
-        2)
-            local status
-            status="$(get_status "${VM_NAMES[0]}")"
-            if [[ "$status" == "RUNNING" ]]; then
-                setsid incus console "${VM_NAMES[0]}" --type vga >/dev/null 2>&1 &
-                msg="Console opened for ${VM_NAMES[0]}."
-            else
-                msg="${VM_NAMES[0]} is not running."
-            fi
-            ;;
-        3)
-            if [[ ${#VM_NAMES[@]} -lt 2 ]]; then
-                msg="No second VM configured."
-                return
-            fi
-            local status
-            status="$(get_status "${VM_NAMES[1]}")"
-            if [[ "$status" == "RUNNING" ]]; then
-                if ! confirm "Stop ${VM_NAMES[1]}?"; then
-                    msg="Stop cancelled."
-                    return
-                fi
-                msg="Stopping ${VM_NAMES[1]}..."
-                draw
-                "$SCRIPT_DIR/shutdown-vm" "${VM_NAMES[1]}" &>/dev/null &
-                wait $!
-                msg="${VM_NAMES[1]} stopped."
-            else
-                msg="Starting ${VM_NAMES[1]}..."
-                draw
-                "$SCRIPT_DIR/boot-vm" "${VM_NAMES[1]}" &>/dev/null &
-                wait $!
-                setsid incus console "${VM_NAMES[1]}" --type vga >/dev/null 2>&1 &
-                msg="${VM_NAMES[1]} started. Console opened."
-            fi
-            ;;
-        4)
-            if [[ ${#VM_NAMES[@]} -lt 2 ]]; then
-                msg="No second VM configured."
-                return
-            fi
-            local status
-            status="$(get_status "${VM_NAMES[1]}")"
-            if [[ "$status" == "RUNNING" ]]; then
-                setsid incus console "${VM_NAMES[1]}" --type vga >/dev/null 2>&1 &
-                msg="Console opened for ${VM_NAMES[1]}."
-            else
-                msg="${VM_NAMES[1]} is not running."
-            fi
-            ;;
-        r|R) ;;  # just refresh
+        r|R) return ;;  # just refresh
         q|Q) exit 0 ;;
-        *) ;;
     esac
+    [[ "$key" =~ ^[0-9]+$ ]] || return
+
+    # Keys map to VMs in pairs: odd = start/stop, even = attach console.
+    #   1,2 -> VM[0]   3,4 -> VM[1]   ...
+    local idx=$(( (key - 1) / 2 ))
+    local sub=$(( (key - 1) % 2 ))
+    if (( key < 1 || idx >= ${#VM_NAMES[@]} )); then
+        msg="No action for '${key}'."
+        return
+    fi
+
+    local vm="${VM_NAMES[idx]}"
+    local status
+    status="$(get_status "$vm")"
+
+    if (( sub == 0 )); then
+        case "$status" in
+            RUNNING)
+                if confirm "Stop ${vm}?"; then
+                    stop_vm "$vm"
+                else
+                    msg="Stop cancelled."
+                fi
+                ;;
+            STOPPED)
+                start_vm "$vm"
+                ;;
+            *)
+                msg="${vm} is ${status}; no start/stop action available."
+                ;;
+        esac
+    else
+        if [[ "$status" == "RUNNING" ]]; then
+            attach_console "$vm"
+            msg="Console opened for ${vm}."
+        else
+            msg="${vm} is not running."
+        fi
+    fi
 }
 
 # Main loop
-trap 'echo; exit 0' INT
-while true; do
-    draw
-    read -rsn1 key
-    [[ -z "$key" ]] && continue
-    do_action "$key"
-done
+main_loop() {
+    trap 'echo; exit 0' INT
+    local key
+    while true; do
+        draw
+        if ! read -rsn1 key; then
+            # stdin closed / not a real terminal -- exit cleanly instead of
+            # spinning on empty reads.
+            echo
+            exit 0
+        fi
+        [[ -z "$key" ]] && continue
+        do_action "$key"
+    done
+}
+
+# Run the loop only when executed directly, so the functions above can be
+# sourced by tests without starting the TUI.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main_loop
+fi
