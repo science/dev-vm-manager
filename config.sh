@@ -8,7 +8,7 @@ VM_NAMES=(dev-1 dev-2)
 # VM resources
 RAM="8GiB"
 CPUS="4"
-DISK="40GiB"
+DISK="150GiB"
 
 # Incus image
 INCUS_IMAGE_REMOTE="images:ubuntu/24.04/cloud"

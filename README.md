@@ -45,7 +45,7 @@ ssh steve@dev-1
 | OS | Ubuntu 24.04 Noble |
 | RAM | 8 GiB |
 | vCPUs | 4 |
-| Disk | 40 GB |
+| Disk | 150 GB |
 | Desktop | Cinnamon (LightDM autologin) |
 | Display | SPICE (`boot-vm` opens console) |
 | Network | DHCP via Incus bridge |

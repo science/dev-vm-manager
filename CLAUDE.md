@@ -20,7 +20,7 @@ Creates and provisions KVM dev VMs using Incus, then deploys yadm dotfiles via S
 | OS | Ubuntu 24.04 Noble |
 | RAM | 8 GiB |
 | vCPUs | 4 |
-| Disk | 40 GB |
+| Disk | 150 GB |
 | Network | Incus managed DHCP (incusbr0) |
 | Graphics | SPICE (via `incus console --type vga`) |
 | Shared dirs | ~/dev (virtiofs), ~/Pictures (virtiofs) |
@@ -85,6 +85,8 @@ These are non-obvious findings from debugging. Don't repeat these mistakes.
 - **`images:ubuntu/24.04` has no cloud-init.** The `/cloud` variant (`images:ubuntu/24.04/cloud`) does, but we don't use cloud-init anyway. Either image works with `incus exec`.
 - **Incus containers fail on this host** (cgroup mount error). Use VMs only. For cache warming, use a throwaway VM not a container.
 - **Virtiofs exec requires a virtiofsd cache fix.** Incus 6.0 hardcodes `--cache=never` for virtiofsd, which disables mmap and breaks binary execution (EFAULT/"Bad address"). Mount-level flags (`raw.mount.options=exec`, `security.noexec`) don't help — the problem is at the virtiofsd process level. Fixed via a `dpkg-divert` wrapper in `setup.sh` that swaps `--cache=never` for `--cache=auto`. Can be removed when Ubuntu ships Incus 7.0+ (which has `io.cache` per-device).
+- **Root disks are sparse, so oversizing is cheap.** The `default` pool uses the `dir` driver, and Incus creates each VM's `root.img` sparse — a 150GiB nominal disk consumes only the blocks actually written (measure with `sudo du -sh` vs `du -sh --apparent-size` on `/var/lib/incus/storage-pools/default/virtual-machines/<vm>`). The tradeoff is overcommit: the pool lives on the host root filesystem, so all VMs filling up at once would wedge the host. Keep total nominal size well under free host space.
+- **Resizing an existing VM's disk**: stop the VM (`./shutdown-vm <vm>`), then `incus config device set <vm> root size=<N>GiB`, then start it. The cloud image's cloud-init runs `growpart` + `resize2fs` during boot, so the partition and filesystem grow on their own — but it finishes *after* the agent and SSH come up, so an immediate `df` can still show the old size. Wait and re-check before concluding it didn't work. If it genuinely didn't grow: `growpart /dev/sda 2 && resize2fs /dev/sda2` in the guest.
 - **Portability**: never hardcode IPs, timezones, bridge names, or UIDs. Discover at runtime: bridge IP via `ip addr show incusbr0`, timezone from `/etc/timezone`, VM IP from `incus list`.
 - **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Runs on host only — VMs are clients configured by `create-dev-vm`. Do NOT install apt-cacher-ng on VMs.
 - **virtiofs + yadm double-tracking causes phantom conflicts.** `~/.claude/` is virtiofs-shared from the host into every VM, so the 4 yadm-tracked files inside it (`CLAUDE.md`, `keybindings.json`, `settings.json`, `statusline.sh`) physically *are* the host's bytes. Each VM's yadm has an independent HEAD commit, so a routine `yadm pull` on a VM diffs the live shared file against its stale HEAD and flags fake conflicts (which then write conflict markers into the host's file via virtiofs — making the mess worse). Fix: `yadm update-index --skip-worktree` on those 4 paths on every VM. The host stays the sole canonical tracker; VMs ignore those paths and rely on virtiofs for content. provision.sh sets this automatically after `yadm clone/pull`. Same trap will apply to any future file added to yadm under a virtiofs-shared path — extend the skip-worktree list if so.
