@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart the SPICE session agent if it is spinning
+Documentation=man:spice-vdagent(1)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/spice-vdagent-guard check

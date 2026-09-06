@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodically check the SPICE session agent for a CPU spin
+# Backstop for spins that don't come from a daemon restart. The observed
+# failure burnt a full core for 12h26m before anyone noticed, so a cheap
+# 15-minute check caps the damage at ~15 minutes.
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=spice-vdagent-guard-watchdog.service
+
+[Install]
+WantedBy=timers.target

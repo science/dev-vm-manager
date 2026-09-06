@@ -83,6 +83,9 @@ ssh steve@dev-1
 | `install.sh` | Symlink scripts into ~/.local/bin, install desktop launcher |
 | `setup.sh` | Install Incus and dependencies |
 | `config.sh` | Shared configuration (VM names, resources, paths) |
+| `acng-mode` | Toggle the host's apt-cacher-ng on/off (build-time cache) |
+| `vm-apt-proxy` | Set/clear/check a VM's pointer at that cache |
+| `install-spice-guard` | Install the SPICE agent spin guard into a VM |
 
 ## Dependencies
 
@@ -90,7 +93,12 @@ ssh steve@dev-1
 - Incus (installed by `setup.sh`)
 - SSH key at `~/.ssh/id_ed25519.pub`
 - [yadm](https://yadm.io/) dotfiles repo for environment configuration
-- apt-cacher-ng on host (optional, dramatically speeds up repeated builds)
+- apt-cacher-ng on host (optional, dramatically speeds up repeated builds). Runs
+  on demand only — the build scripts turn it on, point the VM at it, and always
+  clear that pointer again on exit. A VM left pointing at a stopped cache loses
+  apt entirely, and `unattended-upgrades` keeps reporting success against stale
+  lists, so it stops receiving security updates silently. `vm-apt-proxy status
+  <vm>` detects that state.
 
 ## Design Decisions
 

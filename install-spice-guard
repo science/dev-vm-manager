@@ -1,0 +1,53 @@
+#!/bin/bash
+# install-spice-guard <vm-name>
+# Install the spice-vdagent spin guard into a dev VM.
+#
+# Fixes a failure that costs a full host core indefinitely: upgrading the
+# spice-vdagent package restarts spice-vdagentd but leaves the per-session
+# client running on the deleted old binary, where it busy-loops on a closed fd
+# (poll -> POLLNVAL) with no crash and no log line.
+#
+# Installs:
+#   /usr/local/sbin/spice-vdagent-guard              the restart/check logic
+#   spice-vdagent-guard.service                      oneshot, pulled in by ...
+#   spice-vdagentd.service.d/guard.conf              ... a Wants= drop-in, so
+#                                                    clients refresh on every
+#                                                    daemon (re)start
+#   spice-vdagent-guard-watchdog.{service,timer}     15-min spin backstop
+#
+# Idempotent: safe to re-run.
+set -euo pipefail
+
+VM_NAME="${1:?Usage: install-spice-guard <vm-name>}"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+GUEST_DIR="$SCRIPT_DIR/guest"
+INCUS="${SPICE_GUARD_INCUS_CMD:-incus}"
+
+"$INCUS" info "$VM_NAME" >/dev/null 2>&1 || {
+    echo "install-spice-guard: no such VM: $VM_NAME" >&2; exit 1; }
+
+# Skip cleanly on a VM with no SPICE agent (nothing to guard).
+if ! "$INCUS" exec "$VM_NAME" -- test -x /usr/bin/spice-vdagent 2>/dev/null; then
+    echo "install-spice-guard: $VM_NAME has no spice-vdagent; skipping"
+    exit 0
+fi
+
+push() {  # push <local> <remote> <mode>
+    "$INCUS" file push "$1" "$VM_NAME$2" --mode "$3" --uid 0 --gid 0 --create-dirs
+}
+
+echo "Installing spice-vdagent guard into $VM_NAME..."
+push "$GUEST_DIR/spice-vdagent-guard" /usr/local/sbin/spice-vdagent-guard 0755
+push "$GUEST_DIR/spice-vdagent-guard.service" \
+     /etc/systemd/system/spice-vdagent-guard.service 0644
+push "$GUEST_DIR/spice-vdagent-guard-watchdog.service" \
+     /etc/systemd/system/spice-vdagent-guard-watchdog.service 0644
+push "$GUEST_DIR/spice-vdagent-guard-watchdog.timer" \
+     /etc/systemd/system/spice-vdagent-guard-watchdog.timer 0644
+push "$GUEST_DIR/spice-vdagentd.service.d/guard.conf" \
+     /etc/systemd/system/spice-vdagentd.service.d/guard.conf 0644
+
+"$INCUS" exec "$VM_NAME" -- systemctl daemon-reload
+"$INCUS" exec "$VM_NAME" -- systemctl enable --now spice-vdagent-guard-watchdog.timer
+
+echo "spice-vdagent guard installed in $VM_NAME."

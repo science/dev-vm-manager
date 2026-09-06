@@ -1,0 +1,101 @@
+#!/bin/bash
+# vm-apt-proxy {set|clear|status} <vm-name>
+# Manage a dev VM's apt proxy pointer at the host's apt-cacher-ng.
+#
+# apt-cacher-ng is a *build-time* accelerator only. It runs on-demand (see
+# acng-mode), so a VM must never be left pointing at it: once the service stops,
+# every apt operation in that VM fails with "Connection refused" and
+# unattended-upgrades then "succeeds" against stale lists, silently starving the
+# VM of security updates. So whoever sets the pointer must always clear it.
+#
+#   set <vm>     write the proxy conf in the VM (needs a reachable bridge IP)
+#   clear <vm>   remove it; idempotent, safe on a stopped or absent VM
+#   status <vm>  print "clear", or "set <url> (reachable|UNREACHABLE)";
+#                exits 1 when set but unreachable, i.e. apt is silently broken
+#
+# Test hooks (defaults shown):
+#   VM_APT_PROXY_INCUS_CMD=incus
+#   VM_APT_PROXY_CONF_PATH=/etc/apt/apt.conf.d/01proxy
+#   VM_APT_PROXY_BRIDGE_IP=<discovered from $BRIDGE_IFACE>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$SCRIPT_DIR/config.sh"
+
+INCUS="${VM_APT_PROXY_INCUS_CMD:-incus}"
+CONF_PATH="${VM_APT_PROXY_CONF_PATH:-/etc/apt/apt.conf.d/01proxy}"
+
+usage() {
+    echo "Usage: $(basename "$0") {set|clear|status} <vm-name>" >&2
+    exit 2
+}
+
+bridge_ip() {
+    if [[ -n "${VM_APT_PROXY_BRIDGE_IP-}" ]]; then
+        printf '%s\n' "$VM_APT_PROXY_BRIDGE_IP"
+        return 0
+    fi
+    ip -4 addr show "$BRIDGE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' || true
+}
+
+vm_exists() {
+    "$INCUS" info "$1" >/dev/null 2>&1
+}
+
+# Read the proxy URL currently configured in the VM, or nothing.
+current_url() {
+    "$INCUS" exec "$1" -- cat "$CONF_PATH" 2>/dev/null \
+        | grep -oP 'Proxy\s+"\K[^"]+' || true
+}
+
+cmd_set() {
+    local vm="$1" ip url
+    ip="$(bridge_ip)"
+    if [[ -z "$ip" ]]; then
+        echo "vm-apt-proxy: no IPv4 address on $BRIDGE_IFACE; not setting a proxy" >&2
+        return 1
+    fi
+    url="http://${ip}:${APT_PROXY_PORT}"
+    "$INCUS" exec "$vm" -- bash -c \
+        "printf '%s\n' 'Acquire::http::Proxy \"$url\";' > '$CONF_PATH'"
+    echo "$url"
+}
+
+# Unconditional and idempotent: this file is only ever written by these
+# scripts, so removing it is always safe, whether or not we wrote it.
+cmd_clear() {
+    local vm="$1"
+    vm_exists "$vm" || return 0
+    "$INCUS" exec "$vm" -- rm -f "$CONF_PATH" 2>/dev/null || true
+}
+
+cmd_status() {
+    local vm="$1" url host port
+    if ! vm_exists "$vm"; then
+        echo "clear (no such VM)"
+        return 0
+    fi
+    url="$(current_url "$vm")"
+    if [[ -z "$url" ]]; then
+        echo "clear"
+        return 0
+    fi
+    host="${url#http://}"; host="${host%%:*}"
+    port="${url##*:}"
+    # Dependency-free reachability probe from inside the VM.
+    if "$INCUS" exec "$vm" -- bash -c \
+        "exec 3<>/dev/tcp/$host/$port" >/dev/null 2>&1; then
+        echo "set $url (reachable)"
+        return 0
+    fi
+    echo "set $url (UNREACHABLE - apt updates in $vm are silently failing)"
+    return 1
+}
+
+[[ $# -eq 2 ]] || usage
+case "$1" in
+    set)    cmd_set    "$2" ;;
+    clear)  cmd_clear  "$2" ;;
+    status) cmd_status "$2" ;;
+    *)      usage ;;
+esac

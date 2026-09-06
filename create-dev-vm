@@ -41,12 +41,16 @@ if [[ -x "$ACNG_MODE_BIN" ]]; then
     fi
 fi
 
+# Two separate concerns, deliberately not gated the same way:
+#   - the VM-side proxy pointer is ALWAYS cleared. acng is a build-time
+#     accelerator; a VM left pointing at it loses apt entirely once the service
+#     stops, and unattended-upgrades then fails silently against stale lists.
+#     We write that file, so we remove it — whether or not we own the service.
+#   - the host service is only turned off if WE turned it on, so an external
+#     `acng-mode on` session (or a parent create-dev-vm) keeps its state.
 cleanup_acng() {
+    "$SCRIPT_DIR/vm-apt-proxy" clear "$VM_NAME" 2>/dev/null || true
     [[ $ACNG_OWNED -eq 1 ]] || return 0
-    # Remove the VM-side proxy file so the VM doesn't point at a dead acng.
-    if incus info "$VM_NAME" >/dev/null 2>&1; then
-        incus exec "$VM_NAME" -- rm -f /etc/apt/apt.conf.d/01proxy 2>/dev/null || true
-    fi
     "$ACNG_MODE_BIN" off >/dev/null 2>&1 || true
 }
 trap cleanup_acng EXIT
@@ -154,11 +158,10 @@ fi
 incus exec "$VM_NAME" -- ln -sf "/usr/share/zoneinfo/$HOST_TZ" /etc/localtime
 incus exec "$VM_NAME" -- bash -c "echo '$HOST_TZ' > /etc/timezone"
 
-# Configure apt proxy (if apt-cacher-ng is available on host)
-BRIDGE_IP="$(ip -4 addr show incusbr0 2>/dev/null | grep -oP 'inet \K[\d.]+' || true)"
+# Point apt at the host's acng for the build only; cleanup_acng clears it.
+BRIDGE_IP="$(ip -4 addr show "$BRIDGE_IFACE" 2>/dev/null | grep -oP 'inet \K[\d.]+' || true)"
 if [[ -n "$BRIDGE_IP" ]] && curl -s --connect-timeout 2 "http://${BRIDGE_IP}:${APT_PROXY_PORT}" >/dev/null 2>&1; then
-    echo "Configuring apt proxy: http://${BRIDGE_IP}:${APT_PROXY_PORT}"
-    incus exec "$VM_NAME" -- bash -c "echo 'Acquire::http::Proxy \"http://${BRIDGE_IP}:${APT_PROXY_PORT}\";' > /etc/apt/apt.conf.d/01proxy"
+    echo "Configuring apt proxy: $("$SCRIPT_DIR/vm-apt-proxy" set "$VM_NAME")"
 else
     echo "No apt proxy detected, using direct downloads."
 fi

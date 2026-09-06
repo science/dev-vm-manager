@@ -1,0 +1,14 @@
+[Unit]
+Description=Restart SPICE session agents after spice-vdagentd restarts
+Documentation=man:spice-vdagent(1)
+After=spice-vdagentd.service
+# Pulled in by a drop-in on spice-vdagentd.service, so this runs every time the
+# daemon starts — including the restart a package upgrade triggers, which is
+# what leaves session clients spinning on a deleted binary.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/spice-vdagent-guard restart
+# The daemon is Type=forking and already listening by the time we run, but give
+# the socket a moment before handing clients to it.
+ExecStartPre=/bin/sleep 2

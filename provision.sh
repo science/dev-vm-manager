@@ -28,11 +28,12 @@ if [[ -x "$ACNG_MODE_BIN" ]]; then
     fi
 fi
 
+# The VM-side proxy pointer is ALWAYS cleared (acng is build-time only; a VM
+# left pointing at a stopped acng loses apt silently). The host service is only
+# stopped if we started it — see the same note in create-dev-vm.
 cleanup_acng() {
+    "$SCRIPT_DIR/vm-apt-proxy" clear "$VM_NAME" 2>/dev/null || true
     [[ $ACNG_OWNED -eq 1 ]] || return 0
-    if incus info "$VM_NAME" >/dev/null 2>&1; then
-        incus exec "$VM_NAME" -- rm -f /etc/apt/apt.conf.d/01proxy 2>/dev/null || true
-    fi
     "$ACNG_MODE_BIN" off >/dev/null 2>&1 || true
 }
 trap cleanup_acng EXIT
@@ -63,13 +64,18 @@ echo "SSH is up."
 # --- Ensure VM apt proxy config when host acng is on ---
 # Idempotent: re-provisioning a VM that lost its 01proxy (e.g. after a previous
 # on-demand cycle cleaned it up) gets it back so the next apt operation is fast.
+# cleanup_acng removes it again on exit, always.
 if [[ -x "$ACNG_MODE_BIN" ]] \
     && [[ "$("$ACNG_MODE_BIN" status 2>/dev/null || true)" == "on" ]]; then
-    BRIDGE_IP="$(ip -4 addr show incusbr0 2>/dev/null | grep -oP 'inet \K[\d.]+' || true)"
-    if [[ -n "$BRIDGE_IP" ]]; then
-        ssh "$TARGET" "echo 'Acquire::http::Proxy \"http://${BRIDGE_IP}:${APT_PROXY_PORT}\";' | sudo tee /etc/apt/apt.conf.d/01proxy >/dev/null"
-    fi
+    "$SCRIPT_DIR/vm-apt-proxy" set "$VM_NAME" >/dev/null || true
 fi
+
+# --- Install the spice-vdagent spin guard ---
+# A spice-vdagent package upgrade restarts spice-vdagentd but leaves the
+# session client on the deleted binary, spinning a full host core forever.
+# The guard restarts clients whenever the daemon does. Non-fatal if it fails.
+"$SCRIPT_DIR/install-spice-guard" "$VM_NAME" || \
+    echo "WARNING: spice-vdagent guard install failed; continuing."
 
 # --- Install yadm + gh ---
 echo "Installing yadm and gh..."

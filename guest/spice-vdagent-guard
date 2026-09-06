@@ -1,0 +1,151 @@
+#!/bin/bash
+# spice-vdagent-guard {restart|check|status}
+#
+# Keeps the per-session SPICE agent (`spice-vdagent`) alive and honest.
+#
+# Why this exists: upgrading the spice-vdagent package restarts the system
+# daemon `spice-vdagentd` but leaves the long-lived per-session client running
+# on the deleted old binary. The orphaned client keeps a closed fd in its
+# poll() set, so poll() returns POLLNVAL immediately, forever — a hard spin at
+# 100% of a host core, indefinitely, with no log line and no crash. Observed on
+# 2026-09-05: 12h26m of burnt CPU on dev-1 after an unattended security upgrade.
+#
+#   restart   unconditionally restart the client in every active graphical
+#             session. Wired to spice-vdagentd.service, so it runs whenever the
+#             daemon (re)starts — which is exactly the moment clients go stale.
+#   check     restart only clients that are actually spinning. Runs on a timer
+#             as a backstop for spins we haven't diagnosed.
+#   status    report each session client's CPU share; exits 1 if any is spinning.
+#
+# Restarting always goes through the packaged user unit, never a bare exec: a
+# client started outside a logind session has no resolvable owner UID, so
+# spice-vdagentd rejects it (`UID mismatch ... suid=4294967295`) and the client
+# then reconnect-loops at ~90% CPU — a different spin with the same symptom.
+set -uo pipefail
+
+# Fraction of one core, sustained over SAMPLE_SECS, that counts as spinning.
+# A healthy client uses ~0%; the failure modes both sit above 85%.
+SPIN_THRESHOLD="${SPICE_GUARD_SPIN_THRESHOLD:-50}"
+SAMPLE_SECS="${SPICE_GUARD_SAMPLE_SECS:-3}"
+CLIENT="spice-vdagent"
+UNIT="spice-vdagent.service"
+
+# Test hooks
+LOGINCTL="${SPICE_GUARD_LOGINCTL:-loginctl}"
+PGREP="${SPICE_GUARD_PGREP:-pgrep}"
+RUNUSER="${SPICE_GUARD_RUNUSER:-runuser}"
+
+log() { echo "spice-vdagent-guard: $*"; }
+
+# Users with an active graphical session, one per line: "<user> <uid>".
+graphical_users() {
+    local sid uid user typ active seen=""
+    while read -r sid _; do
+        [[ -n "$sid" ]] || continue
+        uid="$($LOGINCTL show-session "$sid" -p User --value 2>/dev/null)"
+        user="$($LOGINCTL show-session "$sid" -p Name --value 2>/dev/null)"
+        typ="$($LOGINCTL show-session "$sid" -p Type --value 2>/dev/null)"
+        active="$($LOGINCTL show-session "$sid" -p Active --value 2>/dev/null)"
+        [[ "$typ" == "x11" || "$typ" == "wayland" ]] || continue
+        [[ "$active" == "yes" ]] || continue
+        [[ -n "$user" && -n "$uid" ]] || continue
+        [[ "$seen" == *"|$uid|"* ]] && continue
+        seen="$seen|$uid|"
+        echo "$user $uid"
+    done < <($LOGINCTL list-sessions --no-legend 2>/dev/null)
+}
+
+# CPU jiffies (utime+stime) consumed by a pid so far.
+cpu_jiffies() {
+    local pid="$1" stat
+    stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    # Fields 14/15 counted after the comm field, which may contain spaces.
+    stat="${stat#*) }"
+    awk '{print $12 + $13}' <<<"$stat"
+}
+
+# Percent of one core used by a pid over SAMPLE_SECS.
+cpu_percent() {
+    local pid="$1" a b hz
+    hz="$(getconf CLK_TCK 2>/dev/null || echo 100)"
+    a="$(cpu_jiffies "$pid")" || return 1
+    sleep "$SAMPLE_SECS"
+    b="$(cpu_jiffies "$pid")" || return 1
+    awk -v a="$a" -v b="$b" -v s="$SAMPLE_SECS" -v hz="$hz" \
+        'BEGIN { printf "%d", (b - a) * 100 / (hz * s) }'
+}
+
+client_pids_for_uid() {
+    $PGREP -x -u "$1" "$CLIENT" 2>/dev/null || true
+}
+
+restart_for_user() {
+    local user="$1" uid="$2" pid
+    # Kill every client for this user, including bare autostart-launched ones
+    # that aren't part of the user unit and so wouldn't be caught by a restart.
+    for pid in $(client_pids_for_uid "$uid"); do
+        kill "$pid" 2>/dev/null || true
+    done
+    $RUNUSER -u "$user" -- env "XDG_RUNTIME_DIR=/run/user/$uid" \
+        systemctl --user start "$UNIT" 2>/dev/null
+}
+
+cmd_restart() {
+    local user uid rc=0 any=0
+    while read -r user uid; do
+        [[ -n "${user:-}" ]] || continue
+        any=1
+        if restart_for_user "$user" "$uid"; then
+            log "restarted $CLIENT for $user (uid $uid)"
+        else
+            log "WARNING: failed to restart $CLIENT for $user (uid $uid)"
+            rc=1
+        fi
+    done < <(graphical_users)
+    [[ $any -eq 1 ]] || log "no active graphical session; nothing to restart"
+    return $rc
+}
+
+cmd_check() {
+    local user uid pid pct rc=0
+    while read -r user uid; do
+        [[ -n "${user:-}" ]] || continue
+        for pid in $(client_pids_for_uid "$uid"); do
+            pct="$(cpu_percent "$pid")" || continue
+            if [[ "$pct" -ge "$SPIN_THRESHOLD" ]]; then
+                log "$CLIENT pid $pid ($user) spinning at ${pct}% of a core - restarting"
+                restart_for_user "$user" "$uid" \
+                    && log "restarted $CLIENT for $user" \
+                    || { log "WARNING: restart failed for $user"; rc=1; }
+                break
+            fi
+        done
+    done < <(graphical_users)
+    return $rc
+}
+
+cmd_status() {
+    local user uid pid pct found=0 rc=0
+    while read -r user uid; do
+        [[ -n "${user:-}" ]] || continue
+        for pid in $(client_pids_for_uid "$uid"); do
+            found=1
+            pct="$(cpu_percent "$pid")" || continue
+            if [[ "$pct" -ge "$SPIN_THRESHOLD" ]]; then
+                echo "$user pid $pid: ${pct}% of a core - SPINNING"
+                rc=1
+            else
+                echo "$user pid $pid: ${pct}% of a core - ok"
+            fi
+        done
+    done < <(graphical_users)
+    [[ $found -eq 1 ]] || echo "no $CLIENT client running in an active graphical session"
+    return $rc
+}
+
+case "${1-}" in
+    restart) cmd_restart ;;
+    check)   cmd_check ;;
+    status)  cmd_status ;;
+    *)       echo "Usage: $(basename "$0") {restart|check|status}" >&2; exit 2 ;;
+esac

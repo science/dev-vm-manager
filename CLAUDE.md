@@ -58,15 +58,44 @@ apt-cacher-ng runs on **host machines only** as a local package cache server. VM
 - **Host**: package installed but service **disabled by default**. `create-dev-vm` and `provision.sh` flip it on for the duration of a VM build via `acng-mode on/off` and revert on exit (EXIT trap). Listens on port 3142 only while on.
 - **acng-mode**: `~/.local/bin/acng-mode {on|off|status}` is the toggle. `on` starts the service and writes `/etc/apt/apt.conf.d/01acng`; `off` removes the apt conf and stops the service. Idempotent. Tested at `tests/acng-mode-test.sh`.
 - **Wrapping pattern**: each script records whether acng was already on; if it was off, the script turns it on, sets `ACNG_OWNED=1`, and the EXIT trap reverts. If acng was already on (someone else owns it, e.g. nested provision.sh inside create-dev-vm), the script leaves it alone. This makes nested invocations and external `acng-mode on` sessions safe.
-- **VMs**: when host acng is on, `create-dev-vm` and `provision.sh` write `/etc/apt/apt.conf.d/01proxy` in the VM pointing at the bridge IP. The EXIT trap also removes that file from the VM if the script owned the acng cycle, so a VM whose host acng is off doesn't try to proxy through a dead service.
+- **VMs**: when host acng is on, `create-dev-vm` and `provision.sh` write `/etc/apt/apt.conf.d/01proxy` in the VM pointing at the bridge IP, via `vm-apt-proxy set`. The EXIT trap **always** clears it again with `vm-apt-proxy clear` — unconditionally, *not* gated on `ACNG_OWNED`. acng is a build-time accelerator only; a VM must never outlive a build still pointing at it.
+- **vm-apt-proxy**: `./vm-apt-proxy {set|clear|status} <vm>` manages that pointer. `clear` is idempotent and safe on a stopped or absent VM. `status` also probes the proxy from inside the VM and exits non-zero on `set but UNREACHABLE` — use it to check a VM whose apt has gone quiet. Tested at `tests/vm-apt-proxy-test.sh`.
 - **Cache warming**: first VM build downloads from internet (~15-20 min for cinnamon). Every subsequent VM rebuild or re-provision pulls from the host's cache (seconds). Pre-warm with a throwaway VM: `acng-mode on && apt-get install --download-only ... ; acng-mode off`.
 - **Multi-machine**: each host machine runs its own apt-cacher-ng instance for its own VMs. Caches are local per host.
 - **Why on-demand**: when always-on, acng's worker pool got stuck most days during `apt-daily.timer` and returned 503 to every subsequent apt operation until restarted. Bounded on-windows driven by VM rebuilds avoid that failure mode entirely. See `apt-cacher-ng-ondemand.md` for the full motivation.
+
+## spice-vdagent spin guard
+
+Upgrading the `spice-vdagent` package restarts the system daemon
+`spice-vdagentd` but leaves the long-lived per-session client running on the
+*deleted* old binary. The orphaned client keeps a closed fd in its `poll()` set,
+so `poll()` returns `POLLNVAL` immediately, forever — a hard spin at 100% of a
+**host** core, with no crash and no log line. Seen 2026-09-05 on dev-1: 12h26m
+of burnt CPU from an unattended security upgrade at 10:00:57 that nobody noticed
+until the fans got loud.
+
+- **`guest/`** holds the guest-side files; **`install-spice-guard <vm>`** pushes
+  them in (idempotent, and skips a VM with no `spice-vdagent`). `provision.sh`
+  runs it, so new VMs get it automatically.
+- **Contingent restart** (primary): a `Wants=` drop-in on
+  `spice-vdagentd.service` pulls in `spice-vdagent-guard.service` every time the
+  daemon starts, which restarts the session clients. That fires on exactly the
+  event that strands them, so the window is ~0.
+- **Timed watchdog** (backstop): `spice-vdagent-guard-watchdog.timer` runs
+  `spice-vdagent-guard check` every 15 min and restarts any client sustaining
+  >50% of a core. Catches spins from causes we haven't diagnosed; caps a repeat
+  of the 12-hour burn at ~15 minutes.
+- **`spice-vdagent-guard status`** reports each session client's CPU share and
+  exits non-zero if one is spinning — the quick manual check.
+- **Always restart via the user unit** (`systemctl --user start spice-vdagent`),
+  never by exec'ing the binary. See the Lessons Learned entry below.
 
 ## Testing
 
 Unit tests (sandboxed, no real services touched):
 - `tests/acng-mode-test.sh` — exercises `acng-mode` state machine and the EXIT-trap wrapping pattern. Uses a fake `systemctl` and a tmp `01acng` path injected via `ACNG_*` env hooks.
+- `tests/spice-vdagent-guard-test.sh` — exercises the spin guard: session selection, spin detection (against a real busy loop vs a sleeper), restart-via-user-unit, stale-client kill, and the systemd wiring. Fake `loginctl`/`pgrep`/`runuser` injected via `SPICE_GUARD_*` env hooks.
+- `tests/vm-apt-proxy-test.sh` — exercises `vm-apt-proxy` and the write/clear symmetry in both build scripts. Uses a fake `incus` backed by a tmp dir, injected via `VM_APT_PROXY_*` env hooks. Includes a guard asserting the VM-proxy clear stays *ahead* of the `ACNG_OWNED` gate in `cleanup_acng`.
 
 After `create-dev-vm`:
 - Smoke test runs automatically (VM exists, running, has IP, SSH works)
@@ -89,6 +118,8 @@ These are non-obvious findings from debugging. Don't repeat these mistakes.
 - **Resizing an existing VM's disk**: stop the VM (`./shutdown-vm <vm>`), then `incus config device set <vm> root size=<N>GiB`, then start it. The cloud image's cloud-init runs `growpart` + `resize2fs` during boot, so the partition and filesystem grow on their own — but it finishes *after* the agent and SSH come up, so an immediate `df` can still show the old size. Wait and re-check before concluding it didn't work. If it genuinely didn't grow: `growpart /dev/sda 2 && resize2fs /dev/sda2` in the guest.
 - **Portability**: never hardcode IPs, timezones, bridge names, or UIDs. Discover at runtime: bridge IP via `ip addr show incusbr0`, timezone from `/etc/timezone`, VM IP from `incus list`.
 - **apt-cacher-ng** dramatically reduces debug cycle time. Pre-warm the cache with a throwaway VM before iterating on the real build. Runs on host only — VMs are clients configured by `create-dev-vm`. Do NOT install apt-cacher-ng on VMs.
+- **Restarting a session agent must go through its user unit.** After killing a spinning `spice-vdagent`, relaunching it with `incus exec <vm> -- sudo -u steve /usr/bin/spice-vdagent` puts the process outside any logind session. `spice-vdagentd` then can't resolve its owner UID (`sd_pid_get_owner_uid` → `-ENODATA`), logs `UID mismatch: UID=1000 PID=<pid> suid=4294967295`, and hangs up on every connect — so the client reconnect-loops ~150x/sec at ~90% CPU. Same symptom as the bug you were fixing, different cause, easy to misread as "the fix didn't work". Use `systemctl --user start spice-vdagent` (via `runuser` with `XDG_RUNTIME_DIR` set), which lands it under `user@<uid>.service` where the UID resolves. `spice-vdagent-guard` does this correctly; copy it rather than re-deriving.
+- **Cleanup must not be gated more narrowly than the thing it cleans up.** The VM's `01proxy` was written whenever acng was *reachable*, but removed only when the script *owned* the acng service (`ACNG_OWNED=1`). Running a build while acng was already on — exactly the documented pre-warm workflow, `acng-mode on && ... ; acng-mode off` — therefore wrote the proxy into the VM and never took it back out. The VM then pointed at a dead service forever: every `apt-get update` failed with `connect (111: Connection refused)`, and `unattended-upgrades` kept "succeeding" against stale lists, so the VM silently received **no security updates for 11 days** before anyone noticed (found 2026-09-05 on dev-2, whose lists were last refreshed 2026-08-25). dev-1 escaped only by accident — an unrelated `99tpm-pin-direct` apt conf sorts after `01proxy` and forced `DIRECT`. Fix: whoever writes the pointer always clears it; ownership gates only the *host service* toggle. Whenever you add a "revert on exit" trap, check that its guard is no narrower than the guard on the corresponding write.
 - **virtiofs + yadm double-tracking causes phantom conflicts.** `~/.claude/` is virtiofs-shared from the host into every VM, so the 4 yadm-tracked files inside it (`CLAUDE.md`, `keybindings.json`, `settings.json`, `statusline.sh`) physically *are* the host's bytes. Each VM's yadm has an independent HEAD commit, so a routine `yadm pull` on a VM diffs the live shared file against its stale HEAD and flags fake conflicts (which then write conflict markers into the host's file via virtiofs — making the mess worse). Fix: `yadm update-index --skip-worktree` on those 4 paths on every VM. The host stays the sole canonical tracker; VMs ignore those paths and rely on virtiofs for content. provision.sh sets this automatically after `yadm clone/pull`. Same trap will apply to any future file added to yadm under a virtiofs-shared path — extend the skip-worktree list if so.
 
 ## Don'ts
