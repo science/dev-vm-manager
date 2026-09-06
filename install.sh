@@ -8,7 +8,8 @@ INSTALL_DIR="$HOME/.local/bin"
 
 mkdir -p "$INSTALL_DIR"
 
-scripts=(boot-vm shutdown-vm create-dev-vm destroy-dev-vm provision.sh vm-manager acng-mode)
+scripts=(boot-vm shutdown-vm create-dev-vm destroy-dev-vm provision.sh vm-manager
+         acng-mode vm-apt-proxy install-spice-guard)
 
 for script in "${scripts[@]}"; do
     src="$SCRIPT_DIR/$script"
