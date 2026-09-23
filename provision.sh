@@ -99,31 +99,28 @@ ssh "$TARGET" '
     git config --global credential."https://github.com".helper "!/usr/bin/gh auth git-credential"
 '
 
-# --- Clone or pull yadm dotfiles ---
-echo "Cloning yadm dotfiles..."
-ssh "$TARGET" "
-    if [ -d ~/.local/share/yadm/repo.git ]; then
-        echo 'yadm repo exists, pulling...'
-        yadm pull
-    else
-        yadm clone $REPO --no-bootstrap
-        yadm checkout \"\$HOME\" 2>/dev/null || true
+# --- Clone or fast-forward yadm dotfiles ---
+# ~/.claude is already the host's virtiofs mount (claudemount, above), so the
+# yadm-tracked files under it are the host's live bytes. VM-side git must never
+# write them, and plain git commands do: `yadm checkout "$HOME"` overwrites them
+# unless they are skip-worktree first, and `yadm pull` either refuses or writes
+# through when upstream changed one. Both paths below keep them untouched.
+if ssh "$TARGET" '[ -d ~/.local/share/yadm/repo.git ]'; then
+    # Re-provision: the host's copy of vm-sync-check.sh, so a VM carrying an
+    # older copy still gets the current logic. It re-asserts skip-worktree,
+    # pins changed shared files in the index, and fast-forwards; --now makes a
+    # refusal (e.g. diverged history) fail the provision instead of passing.
+    echo "yadm repo exists, fast-forwarding..."
+    if [[ ! -f "$HOST_VMSYNC_SCRIPT" ]]; then
+        echo "ERROR: $HOST_VMSYNC_SCRIPT not found on this host (dotfiles not checked out?)" >&2
+        exit 1
     fi
-"
-
-# --- Mark virtiofs-shared .claude/* as skip-worktree ---
-# ~/.claude/ is virtiofs-mounted from the host (see claudemount above), so the
-# 4 yadm-tracked files under it are physically the host's bytes. Without this
-# flag, every `yadm pull` on the VM diffs the live shared file against the VM's
-# stale yadm HEAD and generates phantom conflicts. skip-worktree tells the VM's
-# yadm to ignore those paths; the host stays the sole canonical tracker.
-ssh "$TARGET" '
-    yadm update-index --skip-worktree \
-        .claude/CLAUDE.md \
-        .claude/keybindings.json \
-        .claude/settings.json \
-        .claude/statusline.sh
-'
+    ssh "$TARGET" 'bash -s -- --now' < "$HOST_VMSYNC_SCRIPT"
+else
+    # Fresh VM: clone, mark the shared files skip-worktree, THEN checkout.
+    echo "Cloning yadm dotfiles..."
+    ssh "$TARGET" "bash -s -- $REPO ${CLAUDE_SHARED_FILES[*]}" < "$SCRIPT_DIR/guest/yadm-first-clone.sh"
+fi
 
 # --- Decrypt secrets (interactive GPG passphrase) ---
 echo ""
