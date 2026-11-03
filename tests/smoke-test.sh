@@ -6,6 +6,11 @@ set -euo pipefail
 
 VM_NAME="${1:?Usage: smoke-test.sh <vm-name>}"
 TARGET="steve@$VM_NAME"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# Select the Incus project the VM lives in (config.sh); the restricted socket
+# refuses the default project, so a bare 'incus' call would see no VM at all.
+source "$SCRIPT_DIR/../config.sh"
+export INCUS_PROJECT; INCUS_PROJECT="$(vm_project "$VM_NAME")"
 PASS=0
 FAIL=0
 
@@ -14,15 +19,17 @@ check() {
     shift
     if "$@" &>/dev/null; then
         echo "  PASS: $desc"
-        ((PASS++))
+        PASS=$((PASS+1))
     else
         echo "  FAIL: $desc"
-        ((FAIL++))
+        FAIL=$((FAIL+1))
     fi
 }
 
-# Get IP from incus
-VM_IP="$(incus list "$VM_NAME" --format csv -c 4 | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)" || true
+# Get IP from incus. Skip the guest's own docker0/bridge addresses, which incus
+# lists first and which the host cannot reach.
+VM_IP="$(incus list "$VM_NAME" --format csv -c 4 | tr ',' '\n' | grep -vE 'docker|br-|virbr|lxdbr|incusbr' \
+    | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)" || true
 
 echo "=== Smoke test: $VM_NAME (${VM_IP:-no IP}) ==="
 

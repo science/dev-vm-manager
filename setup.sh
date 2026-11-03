@@ -42,21 +42,39 @@ WRAPPER
     echo "virtiofsd wrapper: installed"
 fi
 
-# 3. Ensure user is in incus-admin group
-if id -nG | grep -qw incus-admin; then
-    echo "User $(whoami): in incus-admin group"
+# 3. Ensure user is in the incus group (NOT incus-admin: that group is root
+#    on the host, see ~/.config/yadm/PLAN-passwordless-root.md). The
+#    incus-user daemon gives each member a restricted project, user-<uid>,
+#    that can only attach paths under the member's home.
+if id -nG | tr ' ' '\n' | grep -qx incus; then
+    echo "User $(whoami): in incus group"
 else
-    echo "Adding $(whoami) to incus-admin group..."
-    sudo usermod -aG incus-admin "$(whoami)"
-    echo "NOTE: Run 'newgrp incus-admin' or log out/in for group to take effect."
+    echo "Adding $(whoami) to incus group..."
+    sudo gpasswd -a "$(whoami)" incus
+    echo "NOTE: Log out and in for the group to take effect (scripts use 'sg incus' meanwhile)."
 fi
 
-# 4. Initialize incus if not already done
-if sg incus-admin -c "incus info" &>/dev/null 2>&1; then
+# 4. Initialize incus if not already done (admin operation: sudo)
+if sudo incus info &>/dev/null 2>&1; then
     echo "Incus: initialized"
 else
     echo "Initializing Incus (minimal config)..."
-    sg incus-admin -c "incus admin init --minimal"
+    sudo incus admin init --minimal
+fi
+
+# 4b. Create the per-user project (first contact through the user socket does
+#     it) and keep its VMs on the shared bridge instead of a per-user one, so
+#     addresses and /etc/hosts entries stay as they were. Project edits need
+#     an admin, hence sudo.
+source "$(dirname "$0")/config.sh"
+sg incus -c "incus project list" >/dev/null
+if sudo incus project get "$INCUS_USER_PROJECT" restricted.networks.access | grep -qw "$BRIDGE_IFACE"; then
+    echo "Project $INCUS_USER_PROJECT: may use $BRIDGE_IFACE"
+else
+    echo "Allowing $BRIDGE_IFACE in project $INCUS_USER_PROJECT..."
+    user_bridge="$(sudo incus project get "$INCUS_USER_PROJECT" restricted.networks.access)"
+    sudo incus project set "$INCUS_USER_PROJECT" restricted.networks.access="${BRIDGE_IFACE},${user_bridge}"
+    sudo incus profile device set default eth0 network="$BRIDGE_IFACE" --project "$INCUS_USER_PROJECT"
 fi
 
 # 5. apt-cacher-ng (optional but recommended for fast VM rebuilds)
@@ -74,13 +92,12 @@ else
     echo "Install it with: sudo apt install apt-cacher-ng"
 fi
 
-# 6. Cache base VM image
-source "$(dirname "$0")/config.sh"
-if sg incus-admin -c "incus image list --format csv -c l" | grep -q "^${INCUS_IMAGE_ALIAS}$"; then
+# 6. Cache base VM image (in the user project: images are per project)
+if sg incus -c "incus image list --format csv -c l" | grep -q "^${INCUS_IMAGE_ALIAS}$"; then
     echo "Base image: cached as $INCUS_IMAGE_ALIAS"
 else
     echo "Downloading base VM image (one-time)..."
-    sg incus-admin -c "incus image copy $INCUS_IMAGE_REMOTE local: --alias $INCUS_IMAGE_ALIAS --vm --auto-update=false"
+    sg incus -c "incus image copy $INCUS_IMAGE_REMOTE local: --alias $INCUS_IMAGE_ALIAS --vm --auto-update=false"
 fi
 
 # 7. Verify SSH key exists

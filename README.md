@@ -90,7 +90,11 @@ ssh steve@dev-1
 ## Dependencies
 
 - Ubuntu 24.04 host with KVM support
-- Incus (installed by `setup.sh`)
+- Incus (installed by `setup.sh`). The host user is in the `incus` group, not
+  `incus-admin`: VMs live in a restricted per-user project (`user-<uid>`) that
+  can only share paths under the user's home, so Incus access is not root on
+  the host. `setup.sh` sets this up; admin steps go through `sudo incus`.
+  See CLAUDE.md, "Incus access".
 - SSH key at `~/.ssh/id_ed25519.pub`
 - [yadm](https://yadm.io/) dotfiles repo for environment configuration
 - apt-cacher-ng on host (optional, dramatically speeds up repeated builds). Runs

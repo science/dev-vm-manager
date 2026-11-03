@@ -4,6 +4,44 @@
 
 Creates and provisions KVM dev VMs using Incus, then deploys yadm dotfiles via SSH. The host runs Ubuntu 24.04 with Cinnamon desktop.
 
+## Incus access: the `incus` group and the per-user project
+
+The host user is in the `incus` group, **not** `incus-admin`. `incus-admin` is
+root on the host (it can attach `/` to a privileged container), and sudo on
+the host is PIN-guarded, so handing out root through a group defeats that
+(see `~/.config/yadm/PLAN-passwordless-root.md`). Members of `incus` talk to
+the `incus-user` daemon through `/var/lib/incus/unix.socket.user`, which puts
+each of them in a restricted project named `user-<uid>`. What that project
+refuses: disk sources outside the user's home, privileged containers,
+`raw.qemu`, USB/PCI passthrough, and any change to the project itself. What
+the VMs need, it allows: virtiofs shares under `~`, a `tpm` device, GPUs.
+
+Consequences for the scripts:
+
+- **The project is always selected explicitly.** The restricted socket refuses
+  the `default` project and the client does not switch on its own, so
+  `config.sh` exports `INCUS_PROJECT`. `vm_project NAME` finds where a VM lives
+  (user project first, `default` for a VM not yet moved); every script exports
+  the result before touching a VM.
+- **Every VM carries `raw.idmap` for our uid/gid** (`VM_RAW_IDMAP` in
+  config.sh, set by create-dev-vm). In a restricted project Incus runs
+  virtiofsd as `nobody`; without the map the shares appear nobody-owned and
+  unwritable in the guest. With it the guest sees `steve:steve`, and a file
+  written by guest root lands on the host owned by `nobody`, so a compromised
+  VM cannot plant root-owned files in `~/dev`.
+- **Admin operations need `sudo incus ...`** (PIN): `incus admin init`,
+  project settings, moving an instance between projects.
+- **Never change a disk device on a running VM.** It tries to hot-detach the
+  share, fails ("Chardev ... is busy"), and leaves the mount dead in the guest
+  until a force-stop. Stop the VM first (this also covers adding devices; see
+  Lessons Learned).
+- Moving an existing VM from `default`: stop it, `sudo incus move <vm>
+  --target-project user-<uid>`, `incus config set <vm> raw.idmap="$VM_RAW_IDMAP"`,
+  start it, check the shares with `findmnt` and a write test. On linux-bambam
+  both dev-1 and dev-2 were moved on 2026-11-02 and the `default` project is
+  empty; the `default` fallback in `vm_project` stays for hosts that have not
+  migrated yet.
+
 ## Key Constraints
 
 1. **create-dev-vm creates infrastructure, provision.sh configures software.** Don't mix these — create-dev-vm makes a bootable VM with a user and SSH, provision.sh does everything else.
@@ -95,6 +133,7 @@ Unit tests (sandboxed, no real services touched):
 - `tests/acng-mode-test.sh` — exercises `acng-mode` state machine and the EXIT-trap wrapping pattern. Uses a fake `systemctl` and a tmp `01acng` path injected via `ACNG_*` env hooks.
 - `tests/spice-vdagent-guard-test.sh` — exercises the spin guard: session selection, spin detection (against a real busy loop vs a sleeper), restart-via-user-unit, stale-client kill, and the systemd wiring. Fake `loginctl`/`pgrep`/`runuser` injected via `SPICE_GUARD_*` env hooks.
 - `tests/provision-yadm-test.sh` — how provision.sh runs yadm on a VM whose `~/.claude` is the host's mount: runs `guest/yadm-first-clone.sh` with the real yadm against a throwaway HOME (host bytes survive, skel files still replaced), a control case proving the old clone→checkout→skip-worktree order overwrites them, static checks that provision.sh has no bare `yadm pull`/`checkout`, and parity between `CLAUDE_SHARED_FILES` and the dotfiles' `vm-sync-check.sh` list.
+- `tests/vm-project-test.sh` — exercises `config.sh`'s Incus project selection with a stubbed `incus`: `vm_project` (user project first, `default` only for a VM not yet moved), the `INCUS_PROJECT` default, the `INCUS` hook, `VM_RAW_IDMAP`, and that every script resolves the project and none needs `incus-admin`.
 - `tests/vm-apt-proxy-test.sh` — exercises `vm-apt-proxy` and the write/clear symmetry in both build scripts. Uses a fake `incus` backed by a tmp dir, injected via `VM_APT_PROXY_*` env hooks. Includes a guard asserting the VM-proxy clear stays *ahead* of the `ACNG_OWNED` gate in `cleanup_acng`.
 
 After `create-dev-vm`:

@@ -6,12 +6,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-# Ensure we have incus-admin group access (avoids needing logout/login)
+# Ensure we can reach Incus (the `incus` group; re-exec under it if it was
+# added without a re-login). See config.sh for why the project is explicit.
 if ! incus info &>/dev/null 2>&1; then
-    if id -nG | grep -qw incus-admin; then
-        exec sg incus-admin "$0 $*"
+    if id -nG | tr ' ' '\n' | grep -qx incus; then
+        exec sg incus "$0 $*"
     else
-        echo "ERROR: Not in incus-admin group. Run: sudo usermod -aG incus-admin \$(whoami) && newgrp incus-admin"
+        echo "ERROR: Not in the incus group. Run: sudo gpasswd -a \$(whoami) incus, then log out and in."
         exit 1
     fi
 fi
@@ -55,13 +56,15 @@ cleanup_acng() {
 }
 trap cleanup_acng EXIT
 
-# Check for existing instance
-if incus info "$VM_NAME" &>/dev/null; then
+# Check for existing instance (wherever it lives; see vm_project)
+if INCUS_PROJECT="$(vm_project "$VM_NAME")" incus info "$VM_NAME" &>/dev/null; then
     echo "VM '$VM_NAME' already exists."
     read -rp "Destroy and recreate? [y/N] " confirm
     [[ "$confirm" == [yY] ]] || exit 0
     "$SCRIPT_DIR/destroy-dev-vm" "$VM_NAME"
 fi
+# New VMs are always created in the restricted per-user project.
+export INCUS_PROJECT="$INCUS_USER_PROJECT"
 
 # Ensure base image is cached locally
 if ! incus image list --format csv -c l | grep -q "^${INCUS_IMAGE_ALIAS}$"; then
@@ -78,6 +81,8 @@ incus init "$INCUS_IMAGE_ALIAS" "$VM_NAME" --vm \
     -c limits.memory="$RAM" \
     -c limits.cpu="$CPUS" \
     -d root,size="$DISK"
+# Shared directories must appear as our user inside the guest (config.sh).
+incus config set "$VM_NAME" raw.idmap="$VM_RAW_IDMAP"
 
 # Start VM
 incus start "$VM_NAME"

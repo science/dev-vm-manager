@@ -29,7 +29,7 @@ if ! $found; then
     exit 2
 fi
 if ! incus info &>/dev/null; then
-    echo "ERROR: cannot reach incus. Are you in the incus-admin group?" >&2
+    echo "ERROR: cannot reach incus. Are you in the incus group?" >&2
     exit 2
 fi
 

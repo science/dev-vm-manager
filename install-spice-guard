@@ -22,6 +22,8 @@ VM_NAME="${1:?Usage: install-spice-guard <vm-name>}"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 GUEST_DIR="$SCRIPT_DIR/guest"
 INCUS="${SPICE_GUARD_INCUS_CMD:-incus}"
+source "$SCRIPT_DIR/config.sh"
+export INCUS_PROJECT; INCUS_PROJECT="$(vm_project "$VM_NAME")"
 
 "$INCUS" info "$VM_NAME" >/dev/null 2>&1 || {
     echo "install-spice-guard: no such VM: $VM_NAME" >&2; exit 1; }

@@ -6,12 +6,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
 
-# Ensure we have incus-admin group access (avoids needing logout/login)
+# Ensure we can reach Incus (the `incus` group; re-exec under it if it was
+# added without a re-login). See config.sh for why the project is explicit.
 if ! incus info &>/dev/null 2>&1; then
-    if id -nG | grep -qw incus-admin; then
-        exec sg incus-admin "$0 $*"
+    if id -nG | tr ' ' '\n' | grep -qx incus; then
+        exec sg incus "$0 $*"
     else
-        echo "ERROR: Not in incus-admin group. Run: sudo usermod -aG incus-admin \$(whoami) && newgrp incus-admin"
+        echo "ERROR: Not in the incus group. Run: sudo gpasswd -a \$(whoami) incus, then log out and in."
         exit 1
     fi
 fi
@@ -30,6 +31,7 @@ for VM_NAME in "$@"; do
         errors=1
         continue
     fi
+    export INCUS_PROJECT; INCUS_PROJECT="$(vm_project "$VM_NAME")"
 
     # Check VM exists
     if ! incus info "$VM_NAME" &>/dev/null; then

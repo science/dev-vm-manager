@@ -11,6 +11,7 @@ TARGET="steve@$VM_NAME"
 REPO="https://github.com/science/dotfiles.git"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 source "$SCRIPT_DIR/config.sh"
+export INCUS_PROJECT; INCUS_PROJECT="$(vm_project "$VM_NAME")"
 
 echo "=== Provisioning $VM_NAME ==="
 

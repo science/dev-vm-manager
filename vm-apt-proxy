@@ -24,6 +24,10 @@ source "$SCRIPT_DIR/config.sh"
 
 INCUS="${VM_APT_PROXY_INCUS_CMD:-incus}"
 CONF_PATH="${VM_APT_PROXY_CONF_PATH:-/etc/apt/apt.conf.d/01proxy}"
+# Select the project the VM lives in (config.sh).
+if [[ -n "${2:-}" ]]; then
+    export INCUS_PROJECT; INCUS_PROJECT="$(vm_project "$2")"
+fi
 
 usage() {
     echo "Usage: $(basename "$0") {set|clear|status} <vm-name>" >&2
